@@ -125,6 +125,40 @@ fn encode_png(w: u32, h: u32, bgra: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Small preview for the queue window: fits inside max_w x max_h, BGRA rows top-down.
+/// Each preview pixel averages a sample of the source pixels it covers.
+pub fn thumbnail(png_bytes: &[u8], max_w: u32, max_h: u32) -> Result<(u32, u32, Vec<u8>), String> {
+    let mut reader = png::Decoder::new(png_bytes).read_info().map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    let (w, h) = (info.width, info.height);
+    let rgb = &buf[..info.buffer_size()];
+    let scale = (max_w as f32 / w as f32).min(max_h as f32 / h as f32).min(1.0);
+    let tw = ((w as f32 * scale).round() as u32).max(1);
+    let th = ((h as f32 * scale).round() as u32).max(1);
+    let mut out = Vec::with_capacity((tw * th * 4) as usize);
+    for ty in 0..th {
+        let (y0, y1) = (ty * h / th, ((ty + 1) * h / th).max(ty * h / th + 1));
+        let ystep = ((y1 - y0) / 4).max(1);
+        for tx in 0..tw {
+            let (x0, x1) = (tx * w / tw, ((tx + 1) * w / tw).max(tx * w / tw + 1));
+            let xstep = ((x1 - x0) / 4).max(1);
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for y in (y0..y1).step_by(ystep as usize) {
+                for x in (x0..x1).step_by(xstep as usize) {
+                    let i = ((y * w + x) * 3) as usize;
+                    r += rgb[i] as u32;
+                    g += rgb[i + 1] as u32;
+                    b += rgb[i + 2] as u32;
+                    n += 1;
+                }
+            }
+            out.extend_from_slice(&[(b / n) as u8, (g / n) as u8, (r / n) as u8, 255]);
+        }
+    }
+    Ok((tw, th, out))
+}
+
 /// Decode back to bottom-up BGRA rows, the layout the Windows clipboard expects.
 pub fn decode_to_bgra_bottom_up(png_bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut reader = png::Decoder::new(png_bytes).read_info().map_err(|e| e.to_string())?;

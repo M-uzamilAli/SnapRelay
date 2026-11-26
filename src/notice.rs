@@ -19,7 +19,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, KillTimer, RegisterClassW,
-    MoveWindow, SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, HMENU,
+    MoveWindow, SetLayeredWindowAttributes, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, SetTimer, SetWindowPos, ShowWindow, HMENU,
     HTTRANSPARENT, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
     SW_SHOWNOACTIVATE, WM_DPICHANGED, WM_NCHITTEST, WM_PAINT,
     WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
@@ -69,7 +69,14 @@ pub fn show(text: &str, ms: u32) {
         let work = info.rcWork;
         let w = (rc.right + px(36)).min(work.right - work.left - px(40));
         let h = rc.bottom + px(24);
-        let (x, y) = (work.right - w - px(20), work.bottom - h - px(20));
+        let (mut x, mut y) = (work.right - w - px(20), work.bottom - h - px(20));
+        // Stack above the queue window if it's open on this monitor.
+        if let Some(q) = crate::queue::visible_rect() {
+            if q.left < work.right && q.right > work.left && q.top < work.bottom && q.bottom > work.top {
+                x = q.right - w;
+                y = q.top - h - px(10);
+            }
+        }
         let _ = KillTimer(hwnd, HIDE_TIMER);
         if SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW).is_err() {
             // Fallback so the box never keeps an old, smaller size.
@@ -113,6 +120,11 @@ unsafe fn window() -> HWND {
     )
     .expect("couldn't create the notice window");
     let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 240, LWA_ALPHA);
+    // Keep SnapRelay's own notices out of the screenshots it takes.
+    // (Set SNAPRELAY_VISIBLE_IN_SCREENSHOTS=1 to turn this off, e.g. to take screenshots for docs/tests.)
+    if std::env::var_os("SNAPRELAY_VISIBLE_IN_SCREENSHOTS").is_none() {
+        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+    }
     WINDOW.with(|w| w.set(Some(hwnd)));
     hwnd
 }

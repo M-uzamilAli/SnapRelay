@@ -6,6 +6,7 @@ mod capture;
 mod clipboard;
 mod feedback;
 mod notice;
+mod queue;
 mod release;
 mod select;
 
@@ -23,7 +24,9 @@ use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, Tra
 const HK_FULL: i32 = 1;
 const HK_AREA: i32 = 2;
 const HK_RELEASE: i32 = 3;
+const HK_QUEUE: i32 = 4;
 const VK_A: u32 = 0x41;
+const VK_Q: u32 = 0x51;
 const VK_V: u32 = 0x56;
 const VK_X: u32 = 0x58;
 const VK_Z: u32 = 0x5A;
@@ -69,11 +72,15 @@ fn main() {
         (MOD_WIN | MOD_SHIFT, VK_X, "Win+Shift+X"),
     ])
     .unwrap_or("(none)");
+    let queue_key = register(HK_QUEUE, "open or close the queue window", &[
+        (MOD_WIN | MOD_SHIFT, VK_Q, "Win+Shift+Q"),
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_Q, "Ctrl+Alt+Shift+Q"),
+    ]);
     println!("Close this window (or Ctrl+C) to quit. Screenshots are kept in memory only.\n");
     notice::show(
         &format!(
-            "SnapRelay ready\n{} area  \u{00B7}  {} full screen  \u{00B7}  {} paste",
-            area_key.unwrap_or("-"), full_key.unwrap_or("-"), release_key
+            "SnapRelay ready\n{} area  \u{00B7}  {} full screen  \u{00B7}  {} paste  \u{00B7}  {} queue",
+            area_key.unwrap_or("-"), full_key.unwrap_or("-"), release_key, queue_key.unwrap_or("-")
         ),
         4000,
     );
@@ -81,19 +88,43 @@ fn main() {
     let mut buf = buffer::Buffer::default();
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) }.0 > 0 {
-        if msg.message != WM_HOTKEY {
+        if msg.message == WM_HOTKEY {
+            match msg.wParam.0 as i32 {
+                HK_FULL => capture(&mut buf, false),
+                HK_AREA => capture(&mut buf, true),
+                HK_RELEASE => release::release(&mut buf, &uia, owner, release_key),
+                HK_QUEUE => queue::toggle(&buf),
+                _ => {}
+            }
+        } else {
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            continue;
         }
-        match msg.wParam.0 as i32 {
-            HK_FULL => capture(&mut buf, false),
-            HK_AREA => capture(&mut buf, true),
-            HK_RELEASE => release::release(&mut buf, &uia, owner, release_key),
-            _ => {}
+        // A click in the queue window is carried out here, where the queue lives.
+        if let Some(action) = queue::take_action() {
+            match action {
+                queue::Action::Remove(id) => {
+                    buf.remove(id);
+                    println!("Removed #{id} from the queue.");
+                }
+                queue::Action::ClearAll => {
+                    let (n, _) = buf.summary();
+                    buf.clear();
+                    println!("Cleared the queue ({n} screenshot(s)).");
+                    notice::show(&format!("Cleared {n} screenshot(s)"), 1800);
+                }
+                queue::Action::SendAll => {
+                    // The pop-up never took focus, so the chat box still has it.
+                    release::release(&mut buf, &uia, owner, release_key);
+                    if buf.summary().0 == 0 {
+                        queue::hide();
+                    }
+                }
+            }
         }
+        queue::sync(&buf);
     }
 }
 

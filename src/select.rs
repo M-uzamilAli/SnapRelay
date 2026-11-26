@@ -116,7 +116,8 @@ unsafe fn cleanup() {
     });
 }
 
-unsafe fn make_bitmap(w: u32, h: u32, bgra: &[u8]) -> Option<HBITMAP> {
+/// A Windows bitmap holding these pixels (BGRA, rows top-down). Caller deletes it.
+pub(crate) unsafe fn make_bitmap(w: u32, h: u32, bgra: &[u8]) -> Option<HBITMAP> {
     let bi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
