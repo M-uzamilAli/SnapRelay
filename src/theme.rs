@@ -12,13 +12,22 @@ pub fn is_light() -> bool {
         Some("dark") => return false,
         _ => {}
     }
+    read_personalize(w!("AppsUseLightTheme"))
+}
+
+/// The taskbar follows Windows' own mode, which can differ from the app mode.
+pub fn taskbar_is_light() -> bool {
+    read_personalize(w!("SystemUsesLightTheme"))
+}
+
+fn read_personalize(name: windows::core::PCWSTR) -> bool {
     let mut value: u32 = 1;
     let mut size = std::mem::size_of::<u32>() as u32;
     let err = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
-            w!("AppsUseLightTheme"),
+            name,
             RRF_RT_REG_DWORD,
             None,
             Some(&mut value as *mut u32 as *mut c_void),

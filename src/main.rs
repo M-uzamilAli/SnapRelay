@@ -1,3 +1,7 @@
+// No console window in the release build (it lives in the tray); `cargo run`
+// keeps the console for the developer log.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! SnapRelay prototype: the Application Controller.
 //! Registers the hotkeys, waits for them, and hands each one to the right part.
 
@@ -10,10 +14,13 @@ mod queue;
 mod release;
 mod select;
 mod theme;
+mod tray;
 
 use std::time::Instant;
 
-use windows::Win32::Foundation::HWND;
+use windows::core::w;
+use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND};
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
@@ -48,6 +55,12 @@ fn register(id: i32, what: &str, tries: &[(HOT_KEY_MODIFIERS, u32, &'static str)
 }
 
 fn main() {
+    // Only one SnapRelay at a time: a second copy would fight over the shortcuts.
+    let _single = unsafe { CreateMutexW(None, true, w!("Local\\SnapRelay.SingleInstance")) };
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        println!("SnapRelay is already running.");
+        return;
+    }
     unsafe {
         // Without this, screenshots on a scaled display (125%, 150%) come out the wrong size.
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -56,6 +69,7 @@ fn main() {
     let uia: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
         .expect("Windows accessibility layer (UI Automation) is unavailable");
     let owner = clipboard::create_owner_window();
+    tray::create();
 
     println!("SnapRelay prototype. Shortcuts:");
     let area_key = register(HK_AREA, "capture an area you drag", &[
@@ -129,8 +143,19 @@ fn main() {
                 }
             }
         }
+        if let Some(action) = tray::take_action() {
+            match action {
+                tray::Action::ToggleQueue => queue::toggle(&buf),
+                tray::Action::Quit => break,
+            }
+        }
         queue::sync(&buf);
+        tray::set_tooltip(&match buf.summary().0 {
+            0 => "SnapRelay".to_string(),
+            n => format!("SnapRelay \u{00B7} {n} queued"),
+        });
     }
+    tray::remove();
 }
 
 /// Capture Engine hand-off: copy the screen, optionally let the user pick an area,

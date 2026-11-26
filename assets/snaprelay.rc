@@ -1,0 +1,5 @@
+// Windows resources built into snaprelay.exe.
+// Icon 1 (dark) is the app icon Explorer and Task Manager show.
+// Icon 2 (light) is used for the tray when the taskbar is dark.
+1 ICON "icons/snaprelay-dark.ico"
+2 ICON "icons/snaprelay-light.ico"
