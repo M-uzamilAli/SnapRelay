@@ -1,6 +1,7 @@
 //! Release Controller: finds the focused text box (generic, any app),
-//! then pastes each pending screenshot via a clipboard promise + Ctrl+V,
-//! moving on as soon as the app pulls the image.
+//! then pastes each ticked screenshot, in queue order, via a clipboard promise +
+//! Ctrl+V, moving on as soon as the app pulls the image. Each screenshot's status
+//! is kept in the queue memory, so the queue window shows it live.
 
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -26,7 +27,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, Status};
 use crate::clipboard;
 use crate::notice;
 
@@ -174,16 +175,24 @@ fn wait_for_modifiers_released() {
     }
 }
 
+/// How long "✓ Sent" stays on the queue rows before they're cleared away.
+const SHOW_SENT: Duration = Duration::from_millis(700);
+
 /// Programs that read every clipboard change on their own (sync tools). Their reads
 /// never mean "the paste happened", so they don't block a retry.
 const BACKGROUND_READERS: [&str; 2] = ["msrdc.exe", "PowerToys.MouseWithoutBordersHelper.exe"];
 
 pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: &str) {
     mask_lone_alt(); // must happen first, while the user is still holding the keys
-    let pending = buf.pending_ids();
-    if pending.is_empty() {
-        println!("Nothing to release: the queue has no pending screenshots.");
+    if buf.items().is_empty() {
+        println!("Nothing to release: the queue is empty.");
         notice::show("Nothing queued", 2000);
+        return;
+    }
+    let pending = buf.selected_ids();
+    if pending.is_empty() {
+        println!("Nothing to release: no screenshot is ticked.");
+        notice::show("Nothing selected", 2000);
         return;
     }
     wait_for_modifiers_released();
@@ -214,6 +223,9 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
         println!("  Windows can't see inside {}; trying the paste and checking whether it takes the image.", target.app);
     }
 
+    buf.reset_status();
+    // Show each step on the queue rows right away (we don't return to the main loop until done).
+    let show = |buf: &Buffer| crate::queue::sync(buf);
     let mut delivered = 0;
     for (n, id) in pending.into_iter().enumerate() {
         // Re-check before every paste: if focus moved, stop rather than paste somewhere else.
@@ -224,12 +236,18 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
         };
         if let Err(why) = still_there {
             println!("  Stopped: {why}. Remaining screenshots stay queued.");
+            buf.set_status(id, Status::NotSent);
+            show(buf);
             break;
         }
+        buf.set_status(id, Status::Sending(n + 1, total));
+        show(buf);
         notice::show(&format!("Sending {} of {total}\u{2026}", n + 1), 5000);
         let shot = buf.get(id).expect("pending id exists");
         if let Err(e) = clipboard::promise(owner, &shot.frame.png) {
             println!("  #{id}: clipboard failed ({e}). Kept in queue.");
+            buf.set_status(id, Status::NotSent);
+            show(buf);
             break;
         }
 
@@ -270,7 +288,8 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
         let readers = readers_list();
         match taken {
             Some((read, sent, attempt)) => {
-                buf.remove(id); // delivered: free its memory right away
+                buf.set_status(id, Status::Sent); // removed (memory freed) when the send ends
+                show(buf);
                 delivered += 1;
                 let tries = if attempt > 1 { format!(" on try {attempt}") } else { String::new() };
                 let who = if read.pid == 0 { "an unnamed reader".to_string() } else { app_name(read.pid) };
@@ -281,11 +300,19 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
             }
             None => {
                 println!("  #{id}: not taken by {}. Kept in queue; stopping here.   (readers: {readers})", target.app);
+                buf.set_status(id, Status::NotSent);
+                show(buf);
                 break;
             }
         }
     }
 
+    // Let "✓ Sent" show on the open queue for a moment, then free what was delivered.
+    if delivered > 0 && crate::queue::is_open() {
+        clipboard::settle(owner, SHOW_SENT);
+    }
+    buf.remove_sent();
+    show(buf);
     let kept = total - delivered;
     let (left, bytes) = buf.summary();
     println!(

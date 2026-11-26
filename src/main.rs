@@ -126,19 +126,33 @@ fn main() {
         }
         // A click in the queue window is carried out here, where the queue lives.
         if let Some(action) = queue::take_action() {
-            trim = true;
             match action {
+                queue::Action::Toggle(id) => {
+                    buf.toggle(id);
+                    println!("Ticked: {:?}", buf.selected_ids());
+                }
+                queue::Action::ToggleAll => {
+                    buf.toggle_all();
+                    println!("Ticked: {:?}", buf.selected_ids());
+                }
+                queue::Action::Move(id, to) => {
+                    buf.move_to(id, to);
+                    println!("Moved #{id} to position {}. Order: {:?}", to + 1, buf.items().iter().map(|s| s.id).collect::<Vec<_>>());
+                }
                 queue::Action::Remove(id) => {
+                    trim = true;
                     buf.remove(id);
                     println!("Removed #{id} from the queue.");
                 }
                 queue::Action::ClearAll => {
+                    trim = true;
                     let (n, _) = buf.summary();
                     buf.clear();
                     println!("Cleared the queue ({n} screenshot(s)).");
                     notice::show(&format!("Cleared {n}"), 1500);
                 }
-                queue::Action::SendAll => {
+                queue::Action::Send => {
+                    trim = true;
                     // The pop-up never took focus, so the chat box still has it.
                     release::release(&mut buf, &uia, owner, release_key);
                     if buf.summary().0 == 0 {

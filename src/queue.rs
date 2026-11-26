@@ -1,6 +1,7 @@
 //! Queue window (Win+Shift+Q): a compact pop-up in the bottom-right corner listing
-//! what's queued (numbered 1, 2, 3 by position), with a remove button per
-//! screenshot, "Clear" and "Send".
+//! what's queued (numbered 1, 2, 3 by position = sending order). Each row has a
+//! tick (send it or not), its live send status and a remove button; drag a row to
+//! change the order. "Clear" and "Send N" at the bottom.
 //!
 //! It never takes focus (like the on-screen keyboard), so the chat box keeps its
 //! cursor and "Send" can paste straight into it. Mouse only.
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleDC, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect,
+    AlphaBlend, BitBlt, CreateCompatibleDC, AC_SRC_OVER, BLENDFUNCTION, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect,
     GetMonitorInfoW, MonitorFromPoint, SelectObject,
     SetBkMode, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
     DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
@@ -31,13 +32,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, Tr
 use windows::Win32::UI::WindowsAndMessaging::{WS_EX_LAYERED, 
     CreateWindowExW, DefWindowProcW, GetCursorPos, GetWindowRect, LoadCursorW,
     RegisterClassW, KillTimer, SetCursor, SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, HMENU,
-    HWND_TOPMOST, IDC_ARROW, IDC_HAND, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
+    HWND_TOPMOST, IDC_ARROW, IDC_HAND, IDC_SIZENS, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
     WDA_EXCLUDEFROMCAPTURE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, Status};
 use crate::capture;
 use crate::fonts::{REGULAR_FACE, SEMIBOLD_FACE};
 use crate::select::make_bitmap;
@@ -50,7 +51,14 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 pub enum Action {
     Remove(u32),
     ClearAll,
-    SendAll,
+    /// Send the ticked screenshots.
+    Send,
+    /// Tick or untick one screenshot.
+    Toggle(u32),
+    /// Tick all, or untick all if all are ticked.
+    ToggleAll,
+    /// Dragged to a new position (0 = first to be sent).
+    Move(u32, usize),
 }
 
 // Sizes in 96-dpi units, scaled to the monitor.
@@ -67,6 +75,9 @@ const MAX_ROWS: usize = 6;
 /// Close the pop-up after this long without activity (never while the mouse is over it).
 const IDLE_SECS: u64 = 8;
 const IDLE_TIMER: usize = 7;
+const CHECK: i32 = 18;
+/// How far the mouse must move with the button down before a row starts dragging.
+const DRAG_START: i32 = 5;
 
 // Brand colours (0x00BBGGRR), one set per Windows theme.
 // Slate-Forest / Linen surfaces, sage + eucalyptus edges, Warm Champagne for "Send"
@@ -82,6 +93,7 @@ struct Colors {
     primary_hover: COLORREF,
     on_primary: COLORREF,
     danger: COLORREF,
+    success: COLORREF,
     thumb_bg: COLORREF,
     disabled_fill: COLORREF,
     disabled_text: COLORREF,
@@ -98,6 +110,7 @@ const DARK: Colors = Colors {
     primary_hover: COLORREF(0x00A0_D3ED), // #EDD3A0
     on_primary: COLORREF(0x0025_281C),    // Slate-Forest
     danger: COLORREF(0x006E_7AE0),        // #E07A6E
+    success: COLORREF(0x00A0_C87F),       // #7FC8A0
     thumb_bg: COLORREF(0x001B_1D14),      // #141D1B
     disabled_fill: COLORREF(0x002F_3324),
     disabled_text: COLORREF(0x006B_715E), // #5E716B
@@ -114,6 +127,7 @@ const LIGHT: Colors = Colors {
     primary_hover: COLORREF(0x006E_B6DD), // #DDB66E
     on_primary: COLORREF(0x0025_281C),    // Slate-Forest
     danger: COLORREF(0x003D_48B5),        // #B5483D
+    success: COLORREF(0x0057_7A2F),       // #2F7A57
     thumb_bg: COLORREF(0x00E8_ECEA),      // Stone
     disabled_fill: COLORREF(0x00EC_F0EE), // #EEF0EC
     disabled_text: COLORREF(0x00A9_ADA3), // #A3ADA9
@@ -126,6 +140,11 @@ enum Hit {
     Remove(u32),
     Clear,
     Send,
+    /// A row's tick box, and the "all" tick box in the header.
+    Check(u32),
+    CheckAll,
+    /// Anywhere else on a row: click = tick/untick, drag = reorder.
+    Row(u32),
     /// The scrollbar's draggable handle, and the track around it.
     Thumb,
     Track,
@@ -133,7 +152,7 @@ enum Hit {
 
 impl Hit {
     fn is_button(self) -> bool {
-        matches!(self, Hit::Close | Hit::Remove(_) | Hit::Clear | Hit::Send)
+        matches!(self, Hit::Close | Hit::Remove(_) | Hit::Clear | Hit::Send | Hit::Check(_) | Hit::CheckAll)
     }
 }
 
@@ -141,7 +160,17 @@ struct Row {
     id: u32,
     /// Capture time, "20:41". The row's number is its position, worked out when drawn.
     time: String,
+    selected: bool,
+    status: Status,
     thumb: Option<(HBITMAP, i32, i32)>,
+}
+
+/// A row being dragged to a new place.
+#[derive(Clone, Copy)]
+struct Moving {
+    id: u32,
+    from: usize,
+    to: usize,
 }
 
 struct State {
@@ -161,6 +190,11 @@ struct State {
     fonts: Option<[HFONT; 4]>,
     /// While dragging the scrollbar: where on the handle it was grabbed.
     dragging: Option<i32>,
+    /// Button down on a row: (its id, where). Becomes `moving` once the mouse travels.
+    press: Option<(u32, i32)>,
+    moving: Option<Moving>,
+    /// Last time a drag near the edge scrolled the list (so it scrolls at a calm pace).
+    edge_scroll: Instant,
     last_activity: Instant,
     /// Follows the Windows light/dark setting, read each time the window opens.
     light: bool,
@@ -170,7 +204,7 @@ impl Default for State {
     fn default() -> Self {
         State {
             hwnd: None, open: false, dpi: 96, rows: Vec::new(), seen_version: u64::MAX, scroll: 0,
-            hover: Hit::Nothing, tracking: false, title: String::new(), hint: String::new(), action: None, fonts: None, dragging: None, last_activity: Instant::now(), light: true,
+            hover: Hit::Nothing, tracking: false, title: String::new(), hint: String::new(), action: None, fonts: None, dragging: None, press: None, moving: None, edge_scroll: Instant::now(), last_activity: Instant::now(), light: true,
         }
     }
 }
@@ -254,6 +288,8 @@ pub fn show(buf: &Buffer) {
             s.scroll = 0;
             s.hover = Hit::Nothing;
             s.dragging = None;
+            s.press = None;
+            s.moving = None;
             s.open = true;
             s.last_activity = Instant::now();
             s.light = crate::theme::is_light();
@@ -313,6 +349,8 @@ fn rebuild(buf: &Buffer) {
             Row {
                 id: shot.id,
                 time: shot.time.clone(),
+                selected: shot.selected,
+                status: shot.status,
                 thumb,
             }
         })
@@ -455,6 +493,24 @@ impl Layout {
         let max = total.saturating_sub(MAX_ROWS);
         (((top - t.top) as f32 / room as f32) * max as f32).round().clamp(0.0, max as f32) as usize
     }
+    /// Tick box at the left of row `j`.
+    fn check_rect(&self, j: usize) -> RECT {
+        let r = self.row_rect(j);
+        let b = self.px(CHECK);
+        let top = r.top + (self.row - b) / 2;
+        RECT { left: self.pad, top, right: self.pad + b, bottom: top + b }
+    }
+    /// The "tick all" box in the header, lined up with the rows' boxes.
+    fn check_all(&self) -> RECT {
+        let b = self.px(CHECK);
+        let top = (self.header - b) / 2;
+        RECT { left: self.pad, top, right: self.pad + b, bottom: top + b }
+    }
+    /// Which position a dragged row would land in, for the mouse at `y`.
+    fn slot_at(&self, y: i32, scroll: usize, total: usize) -> usize {
+        let j = ((y - self.header).max(0) / self.row.max(1)) as usize;
+        (scroll + j).min(total.saturating_sub(1))
+    }
     fn remove_rect(&self, j: usize) -> RECT {
         let r = self.row_rect(j);
         let b = self.px(BUTTON);
@@ -499,16 +555,29 @@ fn hit(s: &State, x: i32, y: i32) -> Hit {
             return if y >= th.top && y < th.bottom { Hit::Thumb } else { Hit::Track };
         }
     }
+    if !s.rows.is_empty() && inside(&l.check_all(), x, y) {
+        return Hit::CheckAll;
+    }
     for j in 0..l.visible {
+        let id = s.rows[s.scroll + j].id;
         if inside(&l.remove_rect(j), x, y) {
-            return Hit::Remove(s.rows[s.scroll + j].id);
+            return Hit::Remove(id);
+        }
+        // The tick box gets a little extra room around it, it's a small target.
+        let c = l.check_rect(j);
+        let grow = l.px(6);
+        if inside(&RECT { left: 0, top: c.top - grow, right: c.right + grow, bottom: c.bottom + grow }, x, y) {
+            return Hit::Check(id);
+        }
+        if inside(&l.row_rect(j), x, y) {
+            return Hit::Row(id);
         }
     }
     if !s.rows.is_empty() {
         if inside(&l.clear, x, y) {
             return Hit::Clear;
         }
-        if inside(&l.send, x, y) {
+        if inside(&l.send, x, y) && s.rows.iter().any(|r| r.selected) {
             return Hit::Send;
         }
     }
@@ -538,6 +607,39 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                         s.scroll = next;
                         s.last_activity = Instant::now();
                         return (changed, false);
+                    }
+                    // Button held on a row and the mouse moved: that row is being dragged.
+                    if let Some((id, y0)) = s.press {
+                        let l = layout(&s);
+                        if s.moving.is_none() && (y - y0).abs() >= l.px(DRAG_START) && s.rows.len() > 1 {
+                            if let Some(from) = s.rows.iter().position(|r| r.id == id) {
+                                s.moving = Some(Moving { id, from, to: from });
+                            }
+                        }
+                        if let Some(mut m) = s.moving {
+                            s.last_activity = Instant::now();
+                            // Near the top or bottom edge: scroll so far-away places can be reached.
+                            let max = s.rows.len().saturating_sub(MAX_ROWS);
+                            let edge = l.row / 3;
+                            let mut scrolled = false;
+                            if s.edge_scroll.elapsed() >= Duration::from_millis(150) {
+                                if y < l.header + edge && s.scroll > 0 {
+                                    s.scroll -= 1;
+                                    scrolled = true;
+                                } else if y > l.header + l.body - edge && s.scroll < max {
+                                    s.scroll += 1;
+                                    scrolled = true;
+                                }
+                                if scrolled {
+                                    s.edge_scroll = Instant::now();
+                                }
+                            }
+                            let to = l.slot_at(y, s.scroll, s.rows.len());
+                            let changed = to != m.to || scrolled;
+                            m.to = to;
+                            s.moving = Some(m);
+                            return (changed, false);
+                        }
                     }
                     let h = hit(&s, x, y);
                     let changed = h != s.hover;
@@ -572,8 +674,13 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 LRESULT(0)
             }
             WM_SETCURSOR => {
-                let on_button = STATE.with(|s| s.try_borrow().map(|s| s.hover.is_button()).unwrap_or(false));
-                if on_button {
+                let (on_button, moving) = STATE.with(|s| {
+                    s.try_borrow().map(|s| (s.hover.is_button(), s.moving.is_some())).unwrap_or((false, false))
+                });
+                if moving {
+                    SetCursor(LoadCursorW(None, IDC_SIZENS).unwrap_or_default());
+                    LRESULT(1)
+                } else if on_button {
                     SetCursor(LoadCursorW(None, IDC_HAND).unwrap_or_default());
                     LRESULT(1)
                 } else {
@@ -589,6 +696,11 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                     match hit(&s, x, y) {
                         Hit::Thumb => {
                             s.dragging = Some(y - th.top);
+                            true
+                        }
+                        Hit::Row(id) => {
+                            // Might be a click (tick) or the start of a drag; the mouse decides.
+                            s.press = Some((id, y));
                             true
                         }
                         Hit::Track => {
@@ -614,13 +726,40 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                     present(hwnd);
                     return LRESULT(0);
                 }
+                let (pressed, moved) = STATE.with(|s| {
+                    let mut s = s.borrow_mut();
+                    let pressed = s.press.take();
+                    let moved = s.moving.take();
+                    if let Some(m) = moved {
+                        if m.to != m.from {
+                            // Show the new order straight away; the queue itself is updated by the main loop.
+                            let row = s.rows.remove(m.from);
+                            s.rows.insert(m.to, row);
+                            s.action = Some(Action::Move(m.id, m.to));
+                        }
+                    }
+                    (pressed, moved)
+                });
+                if pressed.is_some() {
+                    let _ = ReleaseCapture();
+                }
+                if moved.is_some() {
+                    present(hwnd);
+                    return LRESULT(0);
+                }
                 let clicked = STATE.with(|s| s.try_borrow().map(|s| hit(&s, x, y)).unwrap_or(Hit::Nothing));
                 match clicked {
                     Hit::Close => hide(),
                     Hit::Remove(id) => STATE.with(|s| s.borrow_mut().action = Some(Action::Remove(id))),
                     Hit::Clear => STATE.with(|s| s.borrow_mut().action = Some(Action::ClearAll)),
-                    Hit::Send => STATE.with(|s| s.borrow_mut().action = Some(Action::SendAll)),
-                    Hit::Thumb | Hit::Track | Hit::Nothing => {}
+                    Hit::Send => STATE.with(|s| s.borrow_mut().action = Some(Action::Send)),
+                    Hit::Check(id) => STATE.with(|s| s.borrow_mut().action = Some(Action::Toggle(id))),
+                    // A plain click on a row (no drag) ticks or unticks it too, a bigger target.
+                    Hit::Row(id) if pressed.map(|(p, _)| p) == Some(id) => {
+                        STATE.with(|s| s.borrow_mut().action = Some(Action::Toggle(id)))
+                    }
+                    Hit::CheckAll => STATE.with(|s| s.borrow_mut().action = Some(Action::ToggleAll)),
+                    Hit::Row(_) | Hit::Thumb | Hit::Track | Hit::Nothing => {}
                 }
                 LRESULT(0)
             }
@@ -679,6 +818,20 @@ unsafe fn draw_x(hdc: HDC, r: &RECT, c: COLORREF, size: i32, thickness: i32) {
     crate::smooth::line(hdc, (cx + half, cy - half), (cx - half, cy + half), c, width);
 }
 
+/// A tick box: an outlined rounded square, or filled with a check mark when ticked.
+unsafe fn draw_check(hdc: HDC, r: &RECT, ticked: bool, c: &Colors, px: impl Fn(i32) -> i32) {
+    if ticked {
+        round(hdc, r, c.text, None, px(8));
+        let (x, y) = (r.left as f32, r.top as f32);
+        let u = (r.right - r.left) as f32 / 18.0;
+        let width = (u * 2.0).max(1.5);
+        crate::smooth::line(hdc, (x + 4.5 * u, y + 9.5 * u), (x + 7.5 * u, y + 12.5 * u), c.bg, width);
+        crate::smooth::line(hdc, (x + 7.5 * u, y + 12.5 * u), (x + 13.5 * u, y + 5.5 * u), c.bg, width);
+    } else {
+        round(hdc, r, c.bg, Some(c.outline), px(8));
+    }
+}
+
 unsafe fn text(hdc: HDC, s: &str, r: RECT, font: HFONT, c: COLORREF, flags: DRAW_TEXT_FORMAT) {
     let old = SelectObject(hdc, font);
     SetTextColor(hdc, c);
@@ -709,7 +862,17 @@ unsafe fn render(mem: HDC, s: &State, l: &Layout, c: &Colors, [f_title, f_button
 
         // Header
         let (pad, w) = (l.pad, l.w);
-        text(mem, &s.title, RECT { left: pad, top: 0, right: l.close.left - l.px(8), bottom: l.header }, f_title, c.text, DT_LEFT | DT_END_ELLIPSIS);
+        let mut title_left = pad;
+        if !s.rows.is_empty() {
+            let all = s.rows.iter().all(|r| r.selected);
+            let box_ = l.check_all();
+            if s.hover == Hit::CheckAll {
+                round(mem, &RECT { left: box_.left - l.px(4), top: box_.top - l.px(4), right: box_.right + l.px(4), bottom: box_.bottom + l.px(4) }, c.hover, None, l.px(10));
+            }
+            draw_check(mem, &box_, all, c, |v| l.px(v));
+            title_left = box_.right + l.px(10);
+        }
+        text(mem, &s.title, RECT { left: title_left, top: 0, right: l.close.left - l.px(8), bottom: l.header }, f_title, c.text, DT_LEFT | DT_END_ELLIPSIS);
         if s.hover == Hit::Close {
             round(mem, &l.close, c.hover, None, l.px(8));
         }
@@ -721,17 +884,29 @@ unsafe fn render(mem: HDC, s: &State, l: &Layout, c: &Colors, [f_title, f_button
             let mid = l.header + l.body / 2;
             text(mem, &s.hint, RECT { left: pad, top: mid - l.px(12), right: w - pad, bottom: mid + l.px(12) }, f_meta, c.muted, DT_CENTER | DT_END_ELLIPSIS);
         }
+        // While a row is dragged, show the order it would make if dropped here.
+        let mut order: Vec<&Row> = s.rows.iter().collect();
+        if let Some(m) = s.moving {
+            let row = order.remove(m.from);
+            order.insert(m.to, row);
+        }
         for j in 0..l.visible {
-            let row = &s.rows[s.scroll + j];
+            let row = order[s.scroll + j];
             let rr = l.row_rect(j);
             let remove_hover = s.hover == Hit::Remove(row.id);
-            if remove_hover {
+            let lifted = s.moving.map(|m| m.id) == Some(row.id);
+            if lifted {
+                fill(mem, &rr, c.hover);
+                fill(mem, &RECT { left: 0, top: rr.top, right: l.px(3), bottom: rr.bottom }, c.primary);
+            } else if remove_hover || (s.moving.is_none() && matches!(s.hover, Hit::Row(id) | Hit::Check(id) if id == row.id)) {
                 fill(mem, &rr, c.hover);
             }
+            draw_check(mem, &l.check_rect(j), row.selected, c, |v| l.px(v));
             // Thumbnail, centred in its box
-            let num = RECT { left: pad, top: rr.top, right: pad + l.px(18), bottom: rr.bottom };
+            let cb = l.check_rect(j);
+            let num = RECT { left: cb.right + l.px(10), top: rr.top, right: cb.right + l.px(28), bottom: rr.bottom };
             text(mem, &(s.scroll + j + 1).to_string(), num, f_number, c.muted, DT_LEFT);
-            let tl = num.right + l.px(8);
+            let tl = num.right + l.px(6);
             let tb = RECT { left: tl, top: rr.top + (l.row - l.px(THUMB_H)) / 2, right: tl + l.px(THUMB_W), bottom: rr.top + (l.row + l.px(THUMB_H)) / 2 };
             fill(mem, &tb, c.thumb_bg);
             if let Some((tbmp, tw, th)) = row.thumb {
@@ -739,13 +914,25 @@ unsafe fn render(mem: HDC, s: &State, l: &Layout, c: &Colors, [f_title, f_button
                 let old = SelectObject(src, tbmp);
                 let x = tb.left + (tb.right - tb.left - tw) / 2;
                 let y = tb.top + (tb.bottom - tb.top - th) / 2;
-                let _ = BitBlt(mem, x, y, tw, th, src, 0, 0, SRCCOPY);
+                if row.selected {
+                    let _ = BitBlt(mem, x, y, tw, th, src, 0, 0, SRCCOPY);
+                } else {
+                    // Unticked: faded, so it reads as "staying behind".
+                    let fade = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 90, AlphaFormat: 0 };
+                    let _ = AlphaBlend(mem, x, y, tw, th, src, 0, 0, tw, th, fade);
+                }
                 SelectObject(src, old);
                 let _ = DeleteDC(src);
             }
             let tx = tb.right + l.px(12);
             let rb = l.remove_rect(j);
-            text(mem, &row.time, RECT { left: tx, top: rr.top, right: rb.left - l.px(8), bottom: rr.bottom }, f_meta, c.muted, DT_LEFT);
+            let (label, font, color) = match row.status {
+                Status::Sending(n, total) => (format!("Sending {n} of {total}\u{2026}"), f_number, c.text),
+                Status::Sent => ("\u{2713} Sent".to_string(), f_number, c.success),
+                Status::NotSent => ("Not sent".to_string(), f_number, c.danger),
+                Status::Waiting => (row.time.clone(), f_meta, if row.selected { c.muted } else { c.disabled_text }),
+            };
+            text(mem, &label, RECT { left: tx, top: rr.top, right: rb.left - l.px(8), bottom: rr.bottom }, font, color, DT_LEFT | DT_END_ELLIPSIS);
             if remove_hover {
                 round(mem, &rb, c.bg, None, l.px(8));
             }
@@ -768,10 +955,12 @@ unsafe fn render(mem: HDC, s: &State, l: &Layout, c: &Colors, [f_title, f_button
         let clear_fill = if enabled && s.hover == Hit::Clear { c.hover } else { c.bg };
         round(mem, &l.clear, clear_fill, Some(c.outline), l.px(10));
         text(mem, "Clear", l.clear, f_button, if enabled { c.text } else { c.disabled_text }, DT_CENTER);
-        let send_fill = if !enabled { c.disabled_fill } else if s.hover == Hit::Send { c.primary_hover } else { c.primary };
+        let ticked = s.rows.iter().filter(|r| r.selected).count();
+        let can_send = ticked > 0;
+        let send_fill = if !can_send { c.disabled_fill } else if s.hover == Hit::Send { c.primary_hover } else { c.primary };
         round(mem, &l.send, send_fill, None, l.px(10));
-        let label = "Send";
-        text(mem, label, l.send, f_button, if enabled { c.on_primary } else { c.disabled_text }, DT_CENTER);
+        let label = if can_send { format!("Send {ticked}") } else { "Send".to_string() };
+        text(mem, &label, l.send, f_button, if can_send { c.on_primary } else { c.disabled_text }, DT_CENTER);
 
     }
 }
