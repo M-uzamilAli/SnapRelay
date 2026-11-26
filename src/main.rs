@@ -22,7 +22,8 @@ use std::time::Instant;
 
 use windows::core::w;
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND};
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Memory::{GetProcessHeap, HeapCompact, HEAP_FLAGS};
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, SetProcessWorkingSetSize};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
@@ -106,7 +107,10 @@ fn main() {
     let mut buf = buffer::Buffer::default();
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) }.0 > 0 {
+        // Set when a screenshot came in or went out, so its working memory can go back.
+        let mut trim = false;
         if msg.message == WM_HOTKEY {
+            trim = true;
             match msg.wParam.0 as i32 {
                 HK_FULL => capture(&mut buf, false),
                 HK_AREA => capture(&mut buf, true),
@@ -122,6 +126,7 @@ fn main() {
         }
         // A click in the queue window is carried out here, where the queue lives.
         if let Some(action) = queue::take_action() {
+            trim = true;
             match action {
                 queue::Action::Remove(id) => {
                     buf.remove(id);
@@ -149,12 +154,27 @@ fn main() {
             }
         }
         queue::sync(&buf);
+        if trim {
+            give_back_memory();
+        }
         tray::set_tooltip(&match buf.summary().0 {
             0 => "SnapRelay".to_string(),
             n => format!("SnapRelay \u{00B7} {n} queued"),
         });
     }
     tray::remove();
+}
+
+/// Hand memory we've finished with back to Windows: the big temporary screenshot
+/// blocks, and pages of code we only needed for a moment. Windows gives pages back
+/// instantly if we need them again; this just stops us looking heavier than we are.
+fn give_back_memory() {
+    unsafe {
+        if let Ok(heap) = GetProcessHeap() {
+            let _ = HeapCompact(heap, HEAP_FLAGS(0));
+        }
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
 }
 
 /// Capture Engine hand-off: copy the screen, optionally let the user pick an area,
@@ -186,7 +206,8 @@ fn capture(buf: &mut buffer::Buffer, pick_area: bool) {
     // (and the flash never appears in the screenshot).
     feedback::click();
     feedback::flash(raw.area);
-    match capture::compress(raw) {
+    let preview_box = queue::preview_size(raw.dpi());
+    match capture::compress(raw, preview_box) {
         Ok(frame) => {
             let (w, h, kb) = (frame.width, frame.height, frame.png.len() / 1024);
             let id = buf.add(frame);

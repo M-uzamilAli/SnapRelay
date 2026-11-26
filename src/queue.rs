@@ -212,6 +212,11 @@ pub fn visible_rect() -> Option<RECT> {
 }
 
 /// Redraw if the queue changed since we last looked.
+/// The box a queue preview must fit in on a monitor at `dpi` (96 = 100%).
+pub fn preview_size(dpi: u32) -> (u32, u32) {
+    ((THUMB_W * dpi as i32 / 96) as u32, (THUMB_H * dpi as i32 / 96) as u32)
+}
+
 pub fn sync(buf: &Buffer) {
     let changed = STATE.with(|s| {
         let s = s.borrow();
@@ -299,7 +304,10 @@ fn rebuild(buf: &Buffer) {
         .iter()
         .map(|shot| {
             let thumb = old.remove(&shot.id).or_else(|| {
-                let (tw, th, px) = capture::thumbnail(&shot.frame.png, p(THUMB_W) as u32, p(THUMB_H) as u32).ok()?;
+                // The preview was made at capture time; only resize it if this
+                // monitor's scale needs a smaller one (never unpack the PNG).
+                let (pw, ph, px) = &shot.frame.preview;
+                let (tw, th, px) = capture::shrink(*pw, *ph, px, p(THUMB_W) as u32, p(THUMB_H) as u32);
                 unsafe { make_bitmap(tw, th, &px) }.map(|b| (b, tw as i32, th as i32))
             });
             Row {
