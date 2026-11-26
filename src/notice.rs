@@ -9,20 +9,19 @@ use std::sync::Once;
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
-    EndPaint, FillRect, GetDC, GetMonitorInfoW, InvalidateRect, MonitorFromPoint, ReleaseDC,
-    SelectObject, SetBkMode, SetTextColor, UpdateWindow, CLEARTYPE_QUALITY,
+    CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
+    FillRect, GetDC, GetMonitorInfoW, MonitorFromPoint, ReleaseDC,
+    SelectObject, SetBkMode, SetTextColor, CLEARTYPE_QUALITY,
     CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK, FW_SEMIBOLD,
-    HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
+    HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, KillTimer, RegisterClassW,
-    MoveWindow, SetLayeredWindowAttributes, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, SetTimer, SetWindowPos, ShowWindow, HMENU,
-    HTTRANSPARENT, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
-    SW_SHOWNOACTIVATE, WM_DPICHANGED, WM_NCHITTEST, WM_PAINT,
-    WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    CreateWindowExW, DefWindowProcW, GetCursorPos, KillTimer, RegisterClassW,
+    MoveWindow, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, SetTimer, SetWindowPos, ShowWindow, HMENU,
+    HTTRANSPARENT, HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
+    SW_SHOWNOACTIVATE, WM_DPICHANGED, WM_NCHITTEST, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -83,9 +82,7 @@ pub fn show(text: &str, ms: u32) {
             let _ = MoveWindow(hwnd, x, y, w, h, false);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
-        crate::smooth::round_corners(hwnd, None); // smooth corners, drawn by Windows
-        let _ = InvalidateRect(hwnd, None, true);
-        let _ = UpdateWindow(hwnd); // paint now, even if we're busy releasing
+        present(hwnd, w, h); // draw now, even if we're busy releasing
         SetTimer(hwnd, HIDE_TIMER, ms, None);
     }
 }
@@ -119,7 +116,6 @@ unsafe fn window() -> HWND {
         0, 0, 10, 10, HWND::default(), HMENU::default(), hinst, None,
     )
     .expect("couldn't create the notice window");
-    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 240, LWA_ALPHA);
     // Keep SnapRelay's own notices out of the screenshots it takes.
     // (Set SNAPRELAY_VISIBLE_IN_SCREENSHOTS=1 to turn this off, e.g. to take screenshots for docs/tests.)
     if std::env::var_os("SNAPRELAY_VISIBLE_IN_SCREENSHOTS").is_none() {
@@ -129,34 +125,32 @@ unsafe fn window() -> HWND {
     hwnd
 }
 
+/// Draw the notice: a rounded card with smooth corners, no shadow.
+unsafe fn present(hwnd: HWND, w: i32, h: i32) {
+    let dpi = SCALE.with(|s| s.get());
+    let px = |v: i32| v * dpi as i32 / 96;
+    crate::smooth::present_rounded(hwnd, w, h, px(8) as f32, None, |hdc| {
+        let rc = RECT { left: 0, top: 0, right: w, bottom: h };
+        let bg = CreateSolidBrush(BG);
+        FillRect(hdc, &rc, bg);
+        let _ = DeleteObject(bg);
+        let font = make_font(dpi);
+        let old = SelectObject(hdc, font);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, FG);
+        let mut text_rc = RECT { left: px(18), top: px(12), right: rc.right - px(18), bottom: rc.bottom - px(12) };
+        TEXT.with(|t| {
+            let mut t = t.borrow().clone();
+            DrawTextW(hdc, &mut t, &mut text_rc, DT_WORDBREAK | DT_NOPREFIX);
+        });
+        SelectObject(hdc, old);
+        let _ = DeleteObject(font);
+    });
+}
+
 extern "system" fn notice_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
-            WM_PAINT => {
-                let mut ps = PAINTSTRUCT::default();
-                let hdc = BeginPaint(hwnd, &mut ps);
-                let mut rc = RECT::default();
-                let _ = GetClientRect(hwnd, &mut rc);
-                let bg = CreateSolidBrush(BG);
-                FillRect(hdc, &rc, bg);
-                let _ = DeleteObject(bg);
-
-                let dpi = SCALE.with(|s| s.get());
-                let px = |v: i32| v * dpi as i32 / 96;
-                let font = make_font(dpi);
-                let old = SelectObject(hdc, font);
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, FG);
-                let mut text_rc = RECT { left: px(18), top: px(12), right: rc.right - px(18), bottom: rc.bottom - px(12) };
-                TEXT.with(|t| {
-                    let mut t = t.borrow().clone();
-                    DrawTextW(hdc, &mut t, &mut text_rc, DT_WORDBREAK | DT_NOPREFIX);
-                });
-                SelectObject(hdc, old);
-                let _ = DeleteObject(font);
-                let _ = EndPaint(hwnd, &ps);
-                LRESULT(0)
-            }
             WM_TIMER if wp.0 == HIDE_TIMER => {
                 let _ = KillTimer(hwnd, HIDE_TIMER);
                 let _ = ShowWindow(hwnd, SW_HIDE);

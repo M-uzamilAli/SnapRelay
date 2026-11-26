@@ -3,11 +3,15 @@
 
 use std::sync::Once;
 
-use windows::Win32::Foundation::{COLORREF, HWND, RECT};
-use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+use std::mem::size_of;
+
+use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
+    AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
+    HBITMAP, HDC, HGDIOBJ,
 };
-use windows::Win32::Graphics::Gdi::HDC;
+use windows::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
 use windows::Win32::Graphics::GdiPlus::{
     FillModeAlternate, GdipAddPathArc, GdipClosePathFigure, GdipCreateFromHDC, GdipCreatePath,
     GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteGraphics, GdipDeletePath,
@@ -97,20 +101,86 @@ pub unsafe fn line(hdc: HDC, (x1, y1): (f32, f32), (x2, y2): (f32, f32), c: COLO
     let _ = GdipDeletePen(pen);
 }
 
-/// Ask Windows 11 to round the window's corners itself (smooth, like its own
-/// menus) and draw its 1px edge in `border` (None = no edge).
-pub fn round_corners(hwnd: HWND, border: Option<COLORREF>) {
-    const NO_BORDER: u32 = 0xFFFF_FFFE; // DWMWA_COLOR_NONE
-    unsafe {
-        let pref = DWMWCP_ROUND;
-        let _ = DwmSetWindowAttribute(
-            hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
-            &pref as *const _ as *const std::ffi::c_void, std::mem::size_of_val(&pref) as u32,
-        );
-        let color: u32 = border.map(|c| c.0).unwrap_or(NO_BORDER);
-        let _ = DwmSetWindowAttribute(
-            hwnd, DWMWA_BORDER_COLOR,
-            &color as *const _ as *const std::ffi::c_void, std::mem::size_of::<u32>() as u32,
-        );
+/// Stroke-only rounded rectangle (1px, smooth), on the inside edge of `r`.
+pub unsafe fn outline(hdc: HDC, r: &RECT, radius: f32, c: COLORREF) {
+    let canvas = Canvas::on(hdc);
+    let (x, y, w, h) = (r.left as f32, r.top as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32);
+    let edge = rounded_path(x + 0.5, y + 0.5, w - 1.0, h - 1.0, (radius - 0.5).max(0.0));
+    let mut pen = std::ptr::null_mut();
+    let _ = GdipCreatePen1(argb(c), 1.0, UnitPixel, &mut pen);
+    let _ = GdipDrawPath(canvas.0, pen, edge);
+    let _ = GdipDeletePen(pen);
+    let _ = GdipDeletePath(edge);
+}
+
+/// A 32-bit, top-down bitmap we can read and write directly.
+unsafe fn dib(screen: HDC, w: i32, h: i32) -> (HDC, HBITMAP, HGDIOBJ, *mut u8) {
+    let bi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let dc = CreateCompatibleDC(screen);
+    let mut bits = std::ptr::null_mut();
+    let bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &mut bits, None, 0).unwrap_or_default();
+    let old = SelectObject(dc, bmp);
+    if !bits.is_null() {
+        std::ptr::write_bytes(bits as *mut u8, 0, (w * h * 4) as usize);
     }
+    (dc, bmp, old, bits as *mut u8)
+}
+
+/// Show a layered window as a rounded card with smooth (blended) corners and no
+/// shadow. `draw` paints the opaque content; outside the rounded shape the
+/// window is transparent, with soft edges. Replaces WM_PAINT for these windows.
+pub unsafe fn present_rounded(hwnd: HWND, w: i32, h: i32, radius: f32, border: Option<COLORREF>, draw: impl FnOnce(HDC)) {
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let screen = GetDC(HWND::default());
+    let (content_dc, content_bmp, content_old, content) = dib(screen, w, h);
+    let (mask_dc, mask_bmp, mask_old, mask) = dib(screen, w, h);
+    if !content.is_null() && !mask.is_null() {
+        draw(content_dc);
+        let full = RECT { left: 0, top: 0, right: w, bottom: h };
+        if let Some(b) = border {
+            outline(content_dc, &full, radius, b);
+        }
+        // The shape: white on black, smooth edges. Its brightness becomes the opacity.
+        rounded(mask_dc, &full, radius, COLORREF(0x00FF_FFFF), None);
+        let n = (w * h * 4) as usize;
+        let px = std::slice::from_raw_parts_mut(content, n);
+        let m = std::slice::from_raw_parts(mask, n);
+        for i in (0..n).step_by(4) {
+            let a = m[i] as u32;
+            // Windows wants colours pre-multiplied by their opacity.
+            px[i] = (px[i] as u32 * a / 255) as u8;
+            px[i + 1] = (px[i + 1] as u32 * a / 255) as u8;
+            px[i + 2] = (px[i + 2] as u32 * a / 255) as u8;
+            px[i + 3] = a as u8;
+        }
+        let size = SIZE { cx: w, cy: h };
+        let origin = POINT::default();
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let _ = UpdateLayeredWindow(hwnd, screen, None, Some(&size), content_dc, Some(&origin), COLORREF(0), Some(&blend), ULW_ALPHA);
+    }
+    SelectObject(content_dc, content_old);
+    SelectObject(mask_dc, mask_old);
+    let _ = DeleteObject(content_bmp);
+    let _ = DeleteObject(mask_bmp);
+    let _ = DeleteDC(content_dc);
+    let _ = DeleteDC(mask_dc);
+    ReleaseDC(HWND::default(), screen);
 }

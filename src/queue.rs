@@ -17,23 +17,23 @@ use std::time::{Duration, Instant};
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
-    GetMonitorInfoW, InvalidateRect, MonitorFromPoint, SelectObject,
+    BitBlt, CreateCompatibleDC, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, FillRect,
+    GetMonitorInfoW, MonitorFromPoint, SelectObject,
     SetBkMode, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
     DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
     DT_SINGLELINE, DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, HBITMAP, HDC, HFONT, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY,
+    MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, SRCCOPY,
     TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, GetWindowRect, LoadCursorW,
+use windows::Win32::UI::WindowsAndMessaging::{WS_EX_LAYERED, 
+    CreateWindowExW, DefWindowProcW, GetCursorPos, GetWindowRect, LoadCursorW,
     RegisterClassW, KillTimer, SetCursor, SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, HMENU,
     HWND_TOPMOST, IDC_ARROW, IDC_HAND, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
     WDA_EXCLUDEFROMCAPTURE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -351,9 +351,8 @@ fn place(first: bool) {
             (r.right, r.bottom)
         };
         let _ = SetWindowPos(hwnd, HWND_TOPMOST, right - l.w, bottom - l.h, l.w, l.h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        // Smooth corners and a 1px edge, drawn by Windows itself.
-        crate::smooth::round_corners(hwnd, Some(if light { LIGHT.outline } else { DARK.outline }));
-        let _ = InvalidateRect(hwnd, None, false);
+        let _ = light;
+        present(hwnd);
     }
 }
 
@@ -373,7 +372,8 @@ unsafe fn window() -> HWND {
         });
     });
     let hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        // Layered: we supply the whole picture, including its smooth rounded shape.
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         w!("SnapRelayQueue"), w!("SnapRelay queue"), WS_POPUP,
         0, 0, 10, 10, HWND::default(), HMENU::default(), hinst, None,
     )
@@ -519,10 +519,6 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
             // Clicking must never make this the active window (the chat box keeps focus).
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_ERASEBKGND => LRESULT(1),
-            WM_PAINT => {
-                paint(hwnd);
-                LRESULT(0)
-            }
             WM_MOUSEMOVE => {
                 let (x, y) = point(lp);
                 let (changed, start_tracking) = STATE.with(|s| {
@@ -553,7 +549,7 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                     let _ = TrackMouseEvent(&mut t);
                 }
                 if changed {
-                    let _ = InvalidateRect(hwnd, None, false);
+                    present(hwnd);
                 }
                 LRESULT(0)
             }
@@ -564,7 +560,7 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                         s.tracking = false;
                     }
                 });
-                let _ = InvalidateRect(hwnd, None, false);
+                present(hwnd);
                 LRESULT(0)
             }
             WM_SETCURSOR => {
@@ -599,7 +595,7 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 if grabbed {
                     SetCapture(hwnd);
                 }
-                let _ = InvalidateRect(hwnd, None, false);
+                present(hwnd);
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -607,7 +603,7 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 let was_dragging = STATE.with(|s| s.borrow_mut().dragging.take().is_some());
                 if was_dragging {
                     let _ = ReleaseCapture();
-                    let _ = InvalidateRect(hwnd, None, false);
+                    present(hwnd);
                     return LRESULT(0);
                 }
                 let clicked = STATE.with(|s| s.try_borrow().map(|s| hit(&s, x, y)).unwrap_or(Hit::Nothing));
@@ -629,7 +625,7 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                         s.scroll = if delta > 0 { s.scroll.saturating_sub(1) } else { (s.scroll + 1).min(max) };
                     }
                 });
-                let _ = InvalidateRect(hwnd, None, false);
+                present(hwnd);
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == IDLE_TIMER => {
@@ -684,20 +680,22 @@ unsafe fn text(hdc: HDC, s: &str, r: RECT, font: HFONT, c: COLORREF, flags: DRAW
     SelectObject(hdc, old);
 }
 
-unsafe fn paint(hwnd: HWND) {
-    let mut ps = PAINTSTRUCT::default();
-    let hdc = BeginPaint(hwnd, &mut ps);
+/// Redraw the window (it's layered, so there's no WM_PAINT: we push the picture).
+unsafe fn present(hwnd: HWND) {
     STATE.with(|s| {
         let Ok(s) = s.try_borrow() else { return };
-        let Some([f_title, f_button, f_meta, f_number]) = s.fonts else { return };
-        let mut rc = RECT::default();
-        let _ = GetClientRect(hwnd, &mut rc);
+        let Some(fonts) = s.fonts else { return };
         let l = layout(&s);
         let c = if s.light { &LIGHT } else { &DARK };
-        // Draw off-screen, then copy once: no flicker.
-        let mem = CreateCompatibleDC(hdc);
-        let bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
-        let old_bmp = SelectObject(mem, bmp);
+        crate::smooth::present_rounded(hwnd, l.w, l.h, l.px(8) as f32, Some(c.outline), |mem| {
+            render(mem, &s, &l, c, fonts)
+        });
+    });
+}
+
+unsafe fn render(mem: HDC, s: &State, l: &Layout, c: &Colors, [f_title, f_button, f_meta, f_number]: [HFONT; 4]) {
+    {
+        let rc = RECT { left: 0, top: 0, right: l.w, bottom: l.h };
         SetBkMode(mem, TRANSPARENT);
         fill(mem, &rc, c.bg);
 
@@ -767,10 +765,5 @@ unsafe fn paint(hwnd: HWND) {
         let label = "Send";
         text(mem, label, l.send, f_button, if enabled { c.on_primary } else { c.disabled_text }, DT_CENTER);
 
-        let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
-        SelectObject(mem, old_bmp);
-        let _ = DeleteObject(bmp);
-        let _ = DeleteDC(mem);
-    });
-    let _ = EndPaint(hwnd, &ps);
+    }
 }
