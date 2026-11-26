@@ -2,18 +2,24 @@
 //! then pastes each pending screenshot via a clipboard promise + Ctrl+V,
 //! moving on as soon as the app pulls the image.
 
+use std::collections::HashMap;
 use std::mem::size_of;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{
-    IUIAutomation, IUIAutomationElement, IUIAutomationValuePattern, UIA_CONTROLTYPE_ID,
-    UIA_DocumentControlTypeId, UIA_EditControlTypeId, UIA_ValuePatternId,
+    IUIAutomation, IUIAutomationElement, IUIAutomationValuePattern,
+    UIA_CONTROLTYPE_ID, UIA_CustomControlTypeId, UIA_DocumentControlTypeId,
+    UIA_EditControlTypeId, UIA_GroupControlTypeId, UIA_PaneControlTypeId,
+    UIA_ValuePatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
@@ -38,6 +44,9 @@ pub struct Target {
     pub framework: String,
     pub pid: i32,
     pub app: String,
+    /// false = Windows can't see inside this app (e.g. WhatsApp's embedded browser),
+    /// so we try the paste and let the read signal decide.
+    pub sure: bool,
 }
 
 /// Ask Windows: what has focus, and is it a box we can paste into?
@@ -53,6 +62,7 @@ pub fn focused_text_box(uia: &IUIAutomation) -> Result<Target, String> {
             framework: el.CurrentFrameworkId().map(|b| b.to_string()).unwrap_or_default(),
             pid: el.CurrentProcessId().unwrap_or(0),
             app: String::new(),
+            sure: true,
         };
         let target = Target { app: app_name(target.pid as u32), ..target };
 
@@ -70,13 +80,26 @@ pub fn focused_text_box(uia: &IUIAutomation) -> Result<Target, String> {
         };
         if ok {
             Ok(target)
+        } else if is_opaque(ct, &target.name) {
+            // Windows can't tell what this is. It might well be a text box (WhatsApp's
+            // message box shows up like this): try, and the read signal tells us if it worked.
+            Ok(Target { kind: "unknown area", sure: false, ..target })
         } else {
+            let class = el.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
             Err(format!(
-                "focus is on a {} '{}' in {}, which isn't a text box",
-                target.kind, target.name, target.app
+                "focus is on a {} '{}' in {} (type id {}, class '{}'), which isn't a text box",
+                target.kind, target.name, target.app, ct.0, class
             ))
         }
     }
+}
+
+/// An unnamed pane/group/custom element: an app drawing its own content without
+/// telling Windows what's there (e.g. WhatsApp's embedded browser). Named elements
+/// and clearly non-text controls (buttons, lists, menus) are still refused.
+fn is_opaque(ct: UIA_CONTROLTYPE_ID, name: &str) -> bool {
+    let container = ct == UIA_PaneControlTypeId || ct == UIA_GroupControlTypeId || ct == UIA_CustomControlTypeId;
+    container && name.trim().is_empty()
 }
 
 unsafe fn is_editable(el: &IUIAutomationElement) -> Option<bool> {
@@ -180,9 +203,16 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
         "Pasting {total} screenshot(s) into: {} '{}' in {} (drawn by {})",
         target.kind, target.name, target.app, target.framework
     );
-    // Any process of the target app counts (Chrome-based apps read the clipboard
-    // from a different process than the one that owns the text box).
-    let is_target = |pid: u32| app_name(pid).eq_ignore_ascii_case(&target.app);
+    // The app counts if it reads under its own name, or through a helper process it
+    // started (Chrome-based apps and embedded browsers like WhatsApp's read the
+    // clipboard from a different process than the one that owns the window).
+    let parents = parent_map();
+    let is_target = |pid: u32| {
+        app_name(pid).eq_ignore_ascii_case(&target.app) || descends_from(pid, target.pid as u32, &parents)
+    };
+    if !target.sure {
+        println!("  Windows can't see inside {}; trying the paste and checking whether it takes the image.", target.app);
+    }
 
     let mut delivered = 0;
     for (n, id) in pending.into_iter().enumerate() {
@@ -266,6 +296,38 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
             6000,
         );
     }
+}
+
+/// child pid -> parent pid, for every running process.
+fn parent_map() -> HashMap<u32, u32> {
+    let mut map = HashMap::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return map };
+        let mut e = PROCESSENTRY32W { dwSize: size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        if Process32FirstW(snap, &mut e).is_ok() {
+            loop {
+                map.insert(e.th32ProcessID, e.th32ParentProcessID);
+                if Process32NextW(snap, &mut e).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+    map
+}
+
+/// Was `pid` started (directly or a few levels down) by `ancestor`?
+fn descends_from(pid: u32, ancestor: u32, parents: &HashMap<u32, u32>) -> bool {
+    let mut p = pid;
+    for _ in 0..8 {
+        match parents.get(&p) {
+            Some(&parent) if parent == ancestor => return true,
+            Some(&parent) if parent != 0 && parent != p => p = parent,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Everyone who pulled the current image, for the log ("chrome.exe, msrdc.exe").

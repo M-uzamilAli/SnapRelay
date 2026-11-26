@@ -19,8 +19,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, KillTimer, RegisterClassW,
-    SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, HMENU, HTTRANSPARENT,
-    HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WM_NCHITTEST, WM_PAINT,
+    MoveWindow, SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, HMENU,
+    HTTRANSPARENT, HWND_TOPMOST, LWA_ALPHA, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
+    SW_SHOWNOACTIVATE, WM_DPICHANGED, WM_NCHITTEST, WM_PAINT,
     WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -65,13 +66,16 @@ pub fn show(text: &str, ms: u32) {
         let _ = DeleteObject(font);
         ReleaseDC(hwnd, hdc);
 
-        let (w, h) = (rc.right + px(36), rc.bottom + px(24));
         let work = info.rcWork;
-        let _ = SetWindowPos(
-            hwnd, HWND_TOPMOST,
-            work.right - w - px(20), work.bottom - h - px(20), w, h,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        );
+        let w = (rc.right + px(36)).min(work.right - work.left - px(40));
+        let h = rc.bottom + px(24);
+        let (x, y) = (work.right - w - px(20), work.bottom - h - px(20));
+        let _ = KillTimer(hwnd, HIDE_TIMER);
+        if SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW).is_err() {
+            // Fallback so the box never keeps an old, smaller size.
+            let _ = MoveWindow(hwnd, x, y, w, h, false);
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
         SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, w + 1, h + 1, px(14), px(14)), true);
         let _ = InvalidateRect(hwnd, None, true);
         let _ = UpdateWindow(hwnd); // paint now, even if we're busy releasing
@@ -147,6 +151,8 @@ extern "system" fn notice_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 LRESULT(0)
             }
             WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+            // We size ourselves for the monitor's scale; don't let Windows resize us.
+            WM_DPICHANGED => LRESULT(0),
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
     }
