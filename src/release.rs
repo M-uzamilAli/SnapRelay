@@ -22,10 +22,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 
 use crate::buffer::{Buffer, Status};
 use crate::clipboard;
+use crate::notice;
 
 const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
-/// If the app hasn't pulled the image by then, the paste didn't land.
-const READ_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long one Ctrl+V gets before we consider it missed and press again.
+const READ_WAIT: Duration = Duration::from_millis(1200);
+const PASTE_TRIES: u32 = 3;
+/// Quiet time after a new clipboard item, so sync tools grab it before the app pastes.
+const SETTLE: Duration = Duration::from_millis(60);
 
 /// What Windows told us about the focused element.
 pub struct Target {
@@ -147,73 +151,127 @@ fn wait_for_modifiers_released() {
     }
 }
 
-pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND) {
+/// Programs that read every clipboard change on their own (sync tools). Their reads
+/// never mean "the paste happened", so they don't block a retry.
+const BACKGROUND_READERS: [&str; 2] = ["msrdc.exe", "PowerToys.MouseWithoutBordersHelper.exe"];
+
+pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: &str) {
     mask_lone_alt(); // must happen first, while the user is still holding the keys
     let pending = buf.pending_ids();
     if pending.is_empty() {
         println!("Nothing to release: the queue has no pending screenshots.");
+        notice::show("Nothing to send: the queue is empty", 2500);
         return;
     }
     wait_for_modifiers_released();
 
     let started = Instant::now();
+    let total = pending.len();
     let target = match focused_text_box(uia) {
         Ok(t) => t,
         Err(why) => {
             println!("Not pasting: {why}.");
-            println!("  Click into the chat box, then press release again. {} screenshot(s) still queued.", pending.len());
+            println!("  Click into the chat box, then press release again. {total} screenshot(s) still queued.");
+            notice::show(&format!("Click into the chat box first. {total} still queued."), 4000);
             return;
         }
     };
     println!(
-        "Pasting {} screenshot(s) into: {} '{}' in {} (drawn by {})",
-        pending.len(), target.kind, target.name, target.app, target.framework
+        "Pasting {total} screenshot(s) into: {} '{}' in {} (drawn by {})",
+        target.kind, target.name, target.app, target.framework
     );
+    // Any process of the target app counts (Chrome-based apps read the clipboard
+    // from a different process than the one that owns the text box).
+    let is_target = |pid: u32| app_name(pid).eq_ignore_ascii_case(&target.app);
 
-    for id in pending {
+    let mut delivered = 0;
+    for (n, id) in pending.into_iter().enumerate() {
         // Re-check before every paste: if focus moved, stop rather than paste somewhere else.
-        match focused_text_box(uia) {
-            Ok(t) if t.pid == target.pid => {}
-            Ok(t) => {
-                println!("  Stopped: focus moved to {}. Remaining screenshots stay queued.", t.app);
-                return;
-            }
-            Err(why) => {
-                println!("  Stopped: {why}. Remaining screenshots stay queued.");
-                return;
-            }
+        let still_there = match focused_text_box(uia) {
+            Ok(t) if t.pid == target.pid => Ok(()),
+            Ok(t) => Err(format!("focus moved to {}", t.app)),
+            Err(why) => Err(why),
+        };
+        if let Err(why) = still_there {
+            println!("  Stopped: {why}. Remaining screenshots stay queued.");
+            break;
         }
+        notice::show(&format!("Sending {} of {total} to {}...", n + 1, target.app), 5000);
         let shot = buf.get(id).expect("pending id exists");
         if let Err(e) = clipboard::promise(owner, &shot.frame.png) {
             println!("  #{id}: clipboard failed ({e}). Kept in queue.");
-            return;
+            break;
         }
-        let sent = Instant::now();
-        send_ctrl_v();
-        // The signal: the target app pulls the image from us. Any of its processes count
-        // (Chrome-based apps read the clipboard from a different process than the one we see).
-        let is_target = |pid: u32| app_name(pid).eq_ignore_ascii_case(&target.app);
-        match clipboard::wait_for_read(owner, is_target, READ_TIMEOUT) {
-            Ok(read) => {
+
+        let mut taken = None;
+        for attempt in 1..=PASTE_TRIES {
+            // Sync tools grab every new clipboard item; if one still holds the clipboard
+            // open when the app tries to paste, the app quietly gets nothing.
+            clipboard::settle(owner, SETTLE);
+            if let Some((pid, waited)) = clipboard::wait_until_unlocked(owner, Duration::from_secs(1)) {
+                println!("     clipboard was held by {} for {} ms before the paste", app_name(pid), waited.as_millis());
+            }
+            let sent = Instant::now();
+            send_ctrl_v();
+            match clipboard::wait_for_read(owner, &is_target, READ_WAIT) {
+                Ok(read) => {
+                    taken = Some((read, sent, attempt));
+                    break;
+                }
+                Err(reads) => {
+                    // Retrying is safe only if nothing but background sync tools read it
+                    // after our Ctrl+V; otherwise we can't be sure it wasn't pasted.
+                    let unknown: Vec<String> = reads
+                        .iter()
+                        .filter(|r| r.at >= sent)
+                        .map(|r| app_name(r.pid))
+                        .filter(|name| !BACKGROUND_READERS.iter().any(|b| b.eq_ignore_ascii_case(name)))
+                        .collect();
+                    if !unknown.is_empty() {
+                        println!("     read by {} instead; not retrying in case it was pasted there", unknown.join(", "));
+                        break;
+                    }
+                    if attempt < PASTE_TRIES {
+                        println!("     try {attempt}: {} hasn't taken it yet, pressing Ctrl+V again", target.app);
+                    }
+                }
+            }
+        }
+        let readers = readers_list();
+        match taken {
+            Some((read, sent, attempt)) => {
                 buf.mark(id, Status::Delivered);
+                delivered += 1;
+                let tries = if attempt > 1 { format!(" on try {attempt}") } else { String::new() };
                 println!(
-                    "  #{id}: taken by {} as {} after {} ms",
+                    "  #{id}: taken by {} as {} after {} ms{tries}   (readers: {readers})",
                     target.app, read.format, read.at.saturating_duration_since(sent).as_millis()
                 );
             }
-            Err(others) => {
-                println!(
-                    "  #{id}: {} didn't take the image within {} s. Kept in queue; stopping here.",
-                    target.app, READ_TIMEOUT.as_secs()
-                );
-                for o in others {
-                    println!("     (it was read by {} instead)", app_name(o.pid));
-                }
-                return;
+            None => {
+                println!("  #{id}: not taken by {}. Kept in queue; stopping here.   (readers: {readers})", target.app);
+                break;
             }
         }
     }
-    println!("Release finished in {} ms.", started.elapsed().as_millis());
+
+    let kept = total - delivered;
+    println!("Release finished in {} ms: {delivered} of {total} delivered.", started.elapsed().as_millis());
+    if kept == 0 {
+        notice::show(&format!("\u{2713} {delivered} of {total} delivered to {}", target.app), 3000);
+    } else {
+        notice::show(
+            &format!("{delivered} of {total} delivered. {kept} kept in queue. Press {release_key} to retry"),
+            6000,
+        );
+    }
+}
+
+/// Everyone who pulled the current image, for the log ("chrome.exe, msrdc.exe").
+fn readers_list() -> String {
+    let mut names: Vec<String> = clipboard::reads().iter().map(|r| app_name(r.pid)).collect();
+    names.dedup();
+    if names.is_empty() { "none".into() } else { names.join(", ") }
 }
 
 fn send_ctrl_v() {

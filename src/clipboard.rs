@@ -151,7 +151,7 @@ pub fn promise(owner: HWND, png: &[u8]) -> Result<(), String> {
 
 /// Wait until an app from `target_app` pulls the image (the signal), or give up.
 /// On timeout, returns whoever else pulled it, if anyone.
-pub fn wait_for_read(owner: HWND, is_target: impl Fn(u32) -> bool, timeout: Duration) -> Result<Read, Vec<Read>> {
+pub fn wait_for_read(owner: HWND, is_target: &impl Fn(u32) -> bool, timeout: Duration) -> Result<Read, Vec<Read>> {
     let start = Instant::now();
     loop {
         pump(owner);
@@ -164,6 +164,42 @@ pub fn wait_for_read(owner: HWND, is_target: impl Fn(u32) -> bool, timeout: Dura
         }
         sleep(Duration::from_millis(2));
     }
+}
+
+/// Everyone who has pulled the current image so far.
+pub fn reads() -> Vec<Read> {
+    PROMISE.with(|p| p.borrow().reads.clone())
+}
+
+/// Keep answering Windows for a short quiet period.
+pub fn settle(owner: HWND, d: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < d {
+        pump(owner);
+        sleep(Duration::from_millis(2));
+    }
+}
+
+/// If another program has the clipboard open, wait (answering Windows meanwhile)
+/// until it closes it. Returns who held it and for how long, if anyone did.
+pub fn wait_until_unlocked(owner: HWND, max: Duration) -> Option<(u32, Duration)> {
+    let start = Instant::now();
+    let mut holder = None;
+    while start.elapsed() < max {
+        match unsafe { GetOpenClipboardWindow() } {
+            Ok(h) if h != owner => {
+                if holder.is_none() {
+                    let mut pid = 0u32;
+                    unsafe { GetWindowThreadProcessId(h, Some(&mut pid as *mut u32)) };
+                    holder = Some(pid);
+                }
+                pump(owner);
+                sleep(Duration::from_millis(2));
+            }
+            _ => break,
+        }
+    }
+    holder.map(|pid| (pid, start.elapsed()))
 }
 
 /// While waiting, keep answering Windows. Only this window's messages are taken,

@@ -33,6 +33,30 @@ pub fn grab_monitor_under_cursor() -> Result<Raw, String> {
     unsafe { grab_monitor() }
 }
 
+impl Raw {
+    pub fn pixels(&self) -> (u32, u32, &[u8]) {
+        (self.width, self.height, &self.bgra)
+    }
+}
+
+/// Keep only the part of the screenshot inside `r` (pixel coordinates).
+pub fn crop(raw: Raw, r: RECT) -> Raw {
+    let (w, h) = ((r.right - r.left) as u32, (r.bottom - r.top) as u32);
+    let row = raw.width as usize * 4;
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for y in r.top as usize..r.bottom as usize {
+        let start = y * row + r.left as usize * 4;
+        out.extend_from_slice(&raw.bgra[start..start + w as usize * 4]);
+    }
+    let area = RECT {
+        left: raw.area.left + r.left,
+        top: raw.area.top + r.top,
+        right: raw.area.left + r.right,
+        bottom: raw.area.top + r.bottom,
+    };
+    Raw { area, width: w, height: h, bgra: out }
+}
+
 /// Slow step (~hundreds of ms): compress to PNG. The raw pixels are dropped after.
 pub fn compress(raw: Raw) -> Result<Frame, String> {
     let png = encode_png(raw.width, raw.height, &raw.bgra)?;
