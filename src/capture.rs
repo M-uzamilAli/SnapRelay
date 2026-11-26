@@ -4,7 +4,7 @@
 //! Windows Graphics Capture; it can replace this file without touching the rest.
 
 use std::mem::size_of;
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     GetMonitorInfoW, MonitorFromPoint, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
@@ -19,13 +19,27 @@ pub struct Frame {
     pub png: Vec<u8>,
 }
 
-pub fn capture_monitor_under_cursor() -> Result<Frame, String> {
-    let (w, h, bgra) = unsafe { grab_monitor()? };
-    let png = encode_png(w, h, &bgra)?;
-    Ok(Frame { width: w, height: h, png })
+/// Uncompressed pixels straight from the screen copy. Short-lived: compressed
+/// into a Frame right away.
+pub struct Raw {
+    pub area: RECT,
+    width: u32,
+    height: u32,
+    bgra: Vec<u8>,
 }
 
-unsafe fn grab_monitor() -> Result<(u32, u32, Vec<u8>), String> {
+/// Fast step (~tens of ms): copy the monitor under the mouse.
+pub fn grab_monitor_under_cursor() -> Result<Raw, String> {
+    unsafe { grab_monitor() }
+}
+
+/// Slow step (~hundreds of ms): compress to PNG. The raw pixels are dropped after.
+pub fn compress(raw: Raw) -> Result<Frame, String> {
+    let png = encode_png(raw.width, raw.height, &raw.bgra)?;
+    Ok(Frame { width: raw.width, height: raw.height, png })
+}
+
+unsafe fn grab_monitor() -> Result<Raw, String> {
     let mut pt = POINT::default();
     GetCursorPos(&mut pt).map_err(|e| format!("couldn't read mouse position: {e}"))?;
     let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
@@ -67,7 +81,7 @@ unsafe fn grab_monitor() -> Result<(u32, u32, Vec<u8>), String> {
     if lines != h {
         return Err(format!("read {lines} of {h} rows from the screen copy"));
     }
-    Ok((w as u32, h as u32, bgra))
+    Ok(Raw { area: r, width: w as u32, height: h as u32, bgra })
 }
 
 fn encode_png(w: u32, h: u32, bgra: &[u8]) -> Result<Vec<u8>, String> {

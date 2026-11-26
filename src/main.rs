@@ -3,6 +3,7 @@
 
 mod buffer;
 mod capture;
+mod feedback;
 mod release;
 
 use std::time::Instant;
@@ -80,7 +81,14 @@ fn main() {
         match msg.wParam.0 as i32 {
             HK_CAPTURE => {
                 let t = Instant::now();
-                match capture::capture_monitor_under_cursor() {
+                let result = capture::grab_monitor_under_cursor().and_then(|raw| {
+                    // Feedback right after the screen copy, before the slow compression,
+                    // so it feels instant and the flash never appears in the screenshot.
+                    feedback::click();
+                    feedback::flash(raw.area);
+                    capture::compress(raw)
+                });
+                match result {
                     Ok(frame) => {
                         let (w, h, kb) = (frame.width, frame.height, frame.png.len() / 1024);
                         let id = buf.add(frame);
