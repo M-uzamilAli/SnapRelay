@@ -1,0 +1,645 @@
+# Visual Context Bridge
+## Software Design Proposal — V0 / MVP
+
+**Project Type:** Native Windows Desktop Utility  
+**Primary Language:** Rust  
+**Architecture:** Single-process, modular, event-driven application  
+**Storage:** RAM-only temporary screenshot buffer  
+**Target:** Windows 10/11  
+**Status:** Initial Design Proposal
+
+---
+
+# 1. Project Overview
+
+## 1.1 Problem Statement
+
+Developers frequently interact with AI applications such as ChatGPT, Claude, and other AI assistants while working across different desktop applications.
+
+During development, users often need to share visual context from multiple places:
+
+- Code editors
+- Browser windows
+- Documentation
+- Terminal windows
+- Application interfaces
+- Configuration panels
+- Software architecture diagrams
+
+The current workflow is inconvenient:
+
+1. Capture a screenshot.
+2. Switch to the AI application.
+3. Attach or paste the screenshot.
+4. Return to the original application.
+5. Repeat for every additional screenshot.
+
+This repeated application switching interrupts the developer's workflow.
+
+## 1.2 Proposed Solution
+
+Visual Context Bridge is a lightweight Windows utility that allows users to capture screenshots from anywhere in Windows, temporarily store them in a managed queue, and release them into an existing AI conversation.
+
+The application operates independently in the background.
+
+Its primary purpose is to create a bridge between the user's visual workspace and their AI conversation.
+
+## 1.3 Core Product Principle
+
+**Capture anywhere. Queue temporarily. Release when needed.**
+
+The application should prioritize:
+
+- Extremely fast interactions
+- Minimal RAM consumption
+- Near-zero idle CPU usage
+- Keyboard-first interaction
+- Reliable screenshot management
+- No unnecessary background services
+- No cloud dependency for the MVP
+
+---
+
+# 2. Core Architecture
+
+The application consists of five primary components:
+
+1. Application Controller
+2. Capture Engine
+3. Context Buffer
+4. Queue Manager / UI
+5. Release Controller
+
+These components operate inside one native Rust application process.
+
+## 2.1 High-Level Architecture
+
+```mermaid
+flowchart TD
+    U[User Input / Global Hotkeys]
+    AC[Application Controller]
+
+    CE[Capture Engine]
+    CB[Context Buffer]
+    QM[Queue Manager / UI]
+    RC[Release Controller]
+
+    OS[Windows APIs]
+    AI[Existing AI Conversation]
+
+    U --> AC
+    AC --> CE
+    CE --> OS
+    CE -->|Compressed Screenshot| CB
+
+    CB -->|Queue State Change| QM
+    QM -->|User Commands| AC
+
+    AC --> RC
+    RC --> CB
+    RC --> OS
+    OS --> AI
+```
+
+The Application Controller coordinates application-level behaviour. Individual components remain responsible for their specialized operations.
+
+---
+
+# 3. Component Responsibilities
+
+## 3.1 Application Controller
+
+The Application Controller is the central coordinator of the application.
+
+It is responsible for controlling the overall application behaviour, receiving user commands and coordinating communication between components.
+
+### Responsibilities
+
+- Register and handle global keyboard shortcuts.
+- Receive screenshot capture requests.
+- Forward capture requests to the Capture Engine.
+- Track the currently active foreground application.
+- Coordinate opening and closing of the queue UI.
+- Receive release requests from the UI or keyboard shortcuts.
+- Coordinate the Release Controller.
+- Manage application lifecycle and shutdown.
+- Handle component-level events and errors.
+
+### Important Design Principle
+
+The Application Controller should not perform image processing, screenshot encoding, or clipboard operations itself.
+
+It should delegate those operations to their respective components.
+
+Think of it as the application's central coordinator rather than a component that performs every operation.
+
+---
+
+## 3.2 Capture Engine
+
+The Capture Engine is responsible for obtaining screenshot data from the Windows desktop.
+
+It receives capture requests from the Application Controller and processes the captured image before passing it to the Context Buffer.
+
+### Responsibilities
+
+- Capture the active monitor or requested screen region.
+- Interact with Windows screen-capture APIs.
+- Obtain screenshot frame data.
+- Encode/compress the screenshot into a memory-efficient format.
+- Pass the resulting image data to the Context Buffer.
+- Report capture failures.
+
+### Capture Modes
+
+**Region Capture**
+
+Triggered by:
+
+`Win + Shift + A`
+
+Allows the user to select a screen region.
+
+**Quick Capture**
+
+Triggered by:
+
+`Win + Shift + Z`
+
+Captures the configured screen target. The initial default is the active monitor, subject to final confirmation.
+
+### Important Design Principle
+
+Capture Engine owns the capture pipeline, including image encoding.
+
+However, its responsibility ends when the encoded screenshot has been successfully transferred to the Context Buffer.
+
+It does not manage queue ordering or AI delivery.
+
+---
+
+## 3.3 Context Buffer
+
+The Context Buffer is the temporary in-memory storage layer of the application.
+
+It owns the screenshot data and maintains the current collection of captured items.
+
+### Responsibilities
+
+- Store compressed screenshot data in RAM.
+- Assign unique identifiers to screenshots.
+- Maintain screenshot metadata.
+- Provide access to queued screenshot data.
+- Track delivery status.
+- Remove screenshots when requested.
+- Release allocated image memory when items are removed or cleared.
+- Enforce a configurable memory limit.
+
+### Screenshot Item Model
+
+Conceptual Rust model:
+
+```rust
+struct ScreenshotItem {
+    id: Uuid,
+    image_data: Vec<u8>,
+    captured_at: SystemTime,
+    source: CaptureSource,
+    status: ScreenshotStatus,
+}
+```
+
+Possible capture sources:
+
+```rust
+enum CaptureSource {
+    Region,
+    Monitor,
+    Window,
+}
+```
+
+Possible delivery states:
+
+```rust
+enum ScreenshotStatus {
+    Pending,
+    Delivering,
+    Delivered,
+    Failed,
+}
+```
+
+These are initial conceptual types. Exact Rust types and ownership rules will be finalized during implementation design.
+
+### Memory Strategy
+
+The application should:
+
+- Store compressed image bytes instead of keeping full-resolution raw frames.
+- Decode images only when necessary.
+- Avoid unnecessary image copies.
+- Generate thumbnails only when needed.
+- Release memory immediately after an item is removed.
+- Enforce a bounded queue to avoid uncontrolled memory consumption.
+
+### Ownership Principle
+
+The Context Buffer is the single source of truth for screenshot data.
+
+The Queue Manager must not maintain independent copies of screenshot images.
+
+It should operate on screenshot identifiers and metadata supplied by the Context Buffer.
+
+---
+
+## 3.4 Queue Manager / UI
+
+The Queue Manager provides the user-facing interface for inspecting and managing captured screenshots.
+
+It reflects the state of the Context Buffer.
+
+### Responsibilities
+
+- Display queued screenshots.
+- Display screenshot thumbnails.
+- Show the number of queued items.
+- Allow users to inspect screenshots.
+- Remove individual screenshots.
+- Clear the entire queue.
+- Select screenshots for release.
+- Display delivery status.
+- Notify the application when the user requests an operation.
+
+### UI Behaviour
+
+The queue UI should remain compact and lightweight.
+
+It should be accessible through:
+
+`Ctrl + Shift + Q`
+
+The UI should not independently own screenshot data.
+
+When the Context Buffer changes, the Queue Manager receives a state-change notification and updates its displayed information.
+
+### Initial UI Scope
+
+- Screenshot thumbnails
+- Capture order
+- Individual remove action
+- Clear all action
+- Select for release
+- Release selected / release all
+- Delivery status
+
+Advanced image editing, annotation, cropping and reordering can be considered later.
+
+---
+
+## 3.5 Release Controller
+
+The Release Controller is responsible for transferring queued screenshots into the user's existing AI conversation.
+
+It receives release requests through the Application Controller and retrieves screenshot data from the Context Buffer.
+
+### Responsibilities
+
+- Receive a release request.
+- Retrieve selected pending screenshots.
+- Process screenshots sequentially.
+- Place image data on the Windows clipboard.
+- Trigger paste into the intended AI application.
+- Track delivery progress.
+- Report success or failure.
+- Preserve screenshots when delivery fails.
+
+### Initial Delivery Strategy
+
+The MVP will use Windows clipboard-based delivery.
+
+The intended sequence:
+
+1. Retrieve the next screenshot from the Context Buffer.
+2. Copy its image data to the Windows clipboard.
+3. Activate or interact with the intended AI application.
+4. Paste the screenshot into the conversation composer.
+5. Verify attachment completion where technically possible.
+6. Update the screenshot's delivery status.
+7. Continue with the next screenshot.
+
+### Reliability Principle
+
+Executing Ctrl + V does not necessarily mean that the screenshot was successfully attached.
+
+The Release Controller must not silently delete screenshots after issuing a paste command.
+
+If attachment success cannot be verified, the application should preserve the screenshot and report an uncertain or failed delivery state.
+
+### Future Extensibility
+
+Application-specific integrations may eventually be introduced:
+
+- ChatGPT Desktop
+- ChatGPT Browser
+- Claude Desktop
+- Claude Browser
+- Other supported AI applications
+
+The MVP should initially support one target application.
+
+---
+
+# 4. Application Data Flow
+
+## 4.1 Screenshot Capture Flow
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant AC as Application Controller
+    participant CE as Capture Engine
+    participant OS as Windows Capture API
+    participant CB as Context Buffer
+    participant QM as Queue Manager
+
+    User->>AC: Press capture shortcut
+    AC->>CE: Send capture request
+    CE->>OS: Request screen capture
+    OS-->>CE: Return captured frame
+    CE->>CE: Encode / compress image
+    CE->>CB: Store screenshot
+    CB->>CB: Assign ID and metadata
+    CB-->>QM: Notify queue state changed
+    QM->>QM: Refresh visible queue
+```
+
+## 4.2 Application Context Switching
+
+The Application Controller is responsible for understanding the current foreground application.
+
+For example:
+
+- User captures a screenshot from VS Code.
+- User switches to a browser.
+- User switches to ChatGPT.
+- Application Controller detects the active foreground application.
+
+However, detecting the foreground application does not automatically identify the exact conversation inside that application.
+
+The target conversation and delivery behaviour require additional application-specific handling.
+
+Switching applications and releasing screenshots are separate operations.
+
+## 4.3 Screenshot Release Flow
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant AC as Application Controller
+    participant RC as Release Controller
+    participant CB as Context Buffer
+    participant OS as Windows Clipboard
+    participant AI as AI Conversation
+
+    User->>AC: Request screenshot release
+    AC->>RC: Start release operation
+
+    loop Each selected screenshot
+        RC->>CB: Retrieve next pending image
+        CB-->>RC: Return image data
+        RC->>OS: Copy image to clipboard
+        RC->>AI: Paste screenshot
+        AI-->>RC: Attachment result, if observable
+        RC->>CB: Update delivery status
+    end
+
+    RC-->>AC: Release operation completed
+```
+
+---
+
+# 5. Global Keyboard Shortcuts
+
+Initial proposed shortcuts:
+
+| Shortcut | Action |
+|---|---|
+| Win + Shift + A | Region screenshot |
+| Win + Shift + Z | Quick screenshot |
+| Ctrl + Shift + Q | Open queue manager |
+| Release shortcut | To be finalized |
+
+Shortcuts must be registered and handled centrally by the Application Controller.
+
+The implementation must handle shortcut registration conflicts and failed registrations gracefully.
+
+---
+
+# 6. Technology Stack
+
+| Layer | Technology |
+|---|---|
+| Programming Language | Rust |
+| Operating System | Windows 10/11 |
+| Windows API Bindings | windows-rs |
+| Screen Capture | Windows Graphics Capture API |
+| UI Framework | egui — initial candidate |
+| Image Encoding | PNG / suitable image encoding library |
+| Storage | RAM-only |
+| Clipboard | Native Windows clipboard APIs |
+| Background Execution | Single application process |
+
+Technology choices should be validated with a technical prototype before being treated as final.
+
+The application should avoid introducing unnecessary frameworks or multiple processes.
+
+---
+
+# 7. MVP Scope
+
+The MVP should prove the core workflow without introducing advanced features.
+
+## Included
+
+1. Background application execution.
+2. Global keyboard shortcut handling.
+3. Region screenshot capture.
+4. Quick screenshot capture.
+5. Screenshot encoding/compression.
+6. Temporary RAM-based storage.
+7. Multiple screenshot queue.
+8. Minimal queue management UI.
+9. Individual screenshot removal.
+10. Clear-all operation.
+11. Sequential clipboard-based release.
+12. Basic delivery state tracking.
+13. Basic memory and performance measurement.
+
+## Explicitly Excluded
+
+- AI summarization.
+- OCR and automatic text extraction.
+- AI-powered screenshot analysis.
+- Image annotation.
+- Advanced image editing.
+- Cloud synchronization.
+- User authentication.
+- Database or permanent screenshot history.
+- Cross-device synchronization.
+- Multiple simultaneous AI integrations.
+- Advanced conversation detection.
+
+These features are outside the initial MVP.
+
+---
+
+# 8. Performance and Reliability Requirements
+
+The application is intended to be extremely lightweight.
+
+Performance must be measured on the actual target machine.
+
+### Performance Areas
+
+**Idle Performance**
+- Minimal background CPU usage.
+- No unnecessary polling loops.
+- Avoid continuous screen capture.
+- Avoid unnecessary background tasks.
+
+**Memory**
+- Compressed screenshots stored in RAM.
+- Bounded memory consumption.
+- No unnecessary image duplication.
+- Proper cleanup after removal and clearing.
+
+**Responsiveness**
+- Fast global hotkey response.
+- Fast screenshot capture.
+- Responsive queue UI.
+- No UI freezing during image processing or release.
+
+**Reliability**
+- No silent screenshot loss.
+- No accidental duplicate release.
+- Clear error reporting.
+- Safe clipboard handling.
+- Proper cleanup on application shutdown.
+
+### Initial Test Cases
+
+- Capture one screenshot.
+- Capture ten screenshots.
+- Remove one screenshot.
+- Clear all screenshots.
+- Switch between multiple applications.
+- Release multiple screenshots sequentially.
+- Simulate clipboard failure.
+- Simulate target application failure.
+- Close the application with pending screenshots.
+- Measure idle CPU and RAM consumption.
+
+---
+
+# 9. Development Milestones
+
+## Milestone 1 — Capture Prototype
+
+Build a minimal Rust background application.
+
+Demonstrate:
+- Global hotkey registration.
+- Screenshot capture.
+- Region selection.
+- Image encoding.
+
+## Milestone 2 — Context Buffer
+
+Implement:
+- Screenshot item model.
+- In-memory ownership.
+- Multiple item storage.
+- Removal and clearing.
+- Memory usage measurement.
+
+## Milestone 3 — Queue UI
+
+Implement:
+- Thumbnail display.
+- Queue count.
+- Individual removal.
+- Clear-all functionality.
+- Queue state updates.
+
+## Milestone 4 — Release Controller
+
+Implement:
+- Clipboard image handling.
+- Sequential paste.
+- Delivery state management.
+- Failure preservation.
+
+## Milestone 5 — MVP Validation
+
+Test:
+- End-to-end workflow.
+- Application switching.
+- Delivery reliability.
+- CPU and RAM usage.
+- Hotkey responsiveness.
+
+---
+
+# 10. Important Architectural Constraints
+
+Future implementation must follow these principles:
+
+1. Keep the application single-process initially.
+2. Keep screenshot storage in RAM only.
+3. Application Controller coordinates; specialized components perform operations.
+4. Capture Engine does not manage queue state.
+5. Context Buffer owns screenshot data.
+6. Queue Manager manages presentation and user operations, not image ownership.
+7. Release Controller handles clipboard and delivery operations.
+8. Application context detection must remain separate from conversation identification.
+9. Capture must work independently of network connectivity.
+10. Delivery failures must never silently destroy queued screenshots.
+11. Avoid unnecessary abstractions and dependencies.
+12. Measure performance rather than assuming a framework or language is lightweight.
+
+---
+
+# 11. Open Design Decisions
+
+The following details remain intentionally undecided:
+
+- Exact global hotkey behaviour and shortcut conflict handling.
+- Whether quick capture targets an active monitor or active window.
+- Queue UI presentation: tray popup, floating window or normal window.
+- Exact foreground application detection strategy.
+- Release shortcut.
+- Target AI application for the first integration.
+- How to verify that a pasted image has actually been attached.
+- Queue memory limit and overflow policy.
+- Whether delivered screenshots remain in the queue until manually cleared.
+
+These decisions should be finalized before their corresponding implementation milestones.
+
+---
+
+# 12. Final Product Vision
+
+Visual Context Bridge should feel like a native Windows utility rather than a conventional desktop application.
+
+The user should not need to think about file management, manually saving screenshots, or repeatedly switching between applications.
+
+The experience should be:
+
+**Capture → Temporarily Queue → Switch Context → Release.**
+
+The first objective is not to build a feature-rich product.
+
+It is to build the smallest reliable system that solves this workflow exceptionally well.
+
+**End of V0 Design Proposal.**
