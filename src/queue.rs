@@ -19,7 +19,7 @@ use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POI
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
     CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
-    GetMonitorInfoW, GetStockObject, InvalidateRect, MonitorFromPoint, RoundRect, SelectObject,
+    GetMonitorInfoW, GetStockObject, InvalidateRect, LineTo, MonitorFromPoint, MoveToEx, RoundRect, SelectObject,
     SetBkMode, SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
     DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
     DT_SINGLELINE, DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, HBITMAP, HDC, HFONT, MONITORINFO,
@@ -28,12 +28,12 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, GetWindowRect, LoadCursorW,
     RegisterClassW, KillTimer, SetCursor, SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, HMENU,
     HWND_TOPMOST, IDC_ARROW, IDC_HAND, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
-    WDA_EXCLUDEFROMCAPTURE, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WDA_EXCLUDEFROMCAPTURE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -126,6 +126,15 @@ enum Hit {
     Remove(u32),
     Clear,
     Send,
+    /// The scrollbar's draggable handle, and the track around it.
+    Thumb,
+    Track,
+}
+
+impl Hit {
+    fn is_button(self) -> bool {
+        matches!(self, Hit::Close | Hit::Remove(_) | Hit::Clear | Hit::Send)
+    }
 }
 
 struct Row {
@@ -148,7 +157,10 @@ struct State {
     /// Shortcuts that actually registered, shown when the queue is empty.
     hint: String,
     action: Option<Action>,
-    fonts: Option<[HFONT; 3]>, // title, body, small
+    /// Type scale: title, button, meta (time, hint), number.
+    fonts: Option<[HFONT; 4]>,
+    /// While dragging the scrollbar: where on the handle it was grabbed.
+    dragging: Option<i32>,
     last_activity: Instant,
     /// Follows the Windows light/dark setting, read each time the window opens.
     light: bool,
@@ -158,7 +170,7 @@ impl Default for State {
     fn default() -> Self {
         State {
             hwnd: None, open: false, dpi: 96, rows: Vec::new(), seen_version: u64::MAX, scroll: 0,
-            hover: Hit::Nothing, tracking: false, title: String::new(), hint: String::new(), action: None, fonts: None, last_activity: Instant::now(), light: true,
+            hover: Hit::Nothing, tracking: false, title: String::new(), hint: String::new(), action: None, fonts: None, dragging: None, last_activity: Instant::now(), light: true,
         }
     }
 }
@@ -222,7 +234,13 @@ pub fn show(buf: &Buffer) {
         let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         let (mut dpi, mut _y) = (96u32, 96u32);
         let _ = GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dpi, &mut _y);
-        let fonts = [font(dpi, 15, true), font(dpi, 13, true), font(dpi, 12, false)];
+        // Windows 11's interface font: "Display" cut for the title, "Text" cut for the rest.
+        let fonts = [
+            font(dpi, 16, FW_SEMIBOLD.0, w!("Segoe UI Variable Display")), // title
+            font(dpi, 14, FW_SEMIBOLD.0, w!("Segoe UI Variable Text")),    // buttons
+            font(dpi, 13, FW_NORMAL.0, w!("Segoe UI Variable Text")),      // time, hint
+            font(dpi, 12, FW_SEMIBOLD.0, w!("Segoe UI Variable Text")),    // row number
+        ];
         STATE.with(|s| {
             let mut s = s.borrow_mut();
             s.hwnd = Some(hwnd);
@@ -230,6 +248,7 @@ pub fn show(buf: &Buffer) {
             s.fonts = Some(fonts);
             s.scroll = 0;
             s.hover = Hit::Nothing;
+            s.dragging = None;
             s.open = true;
             s.last_activity = Instant::now();
             s.light = crate::theme::is_light();
@@ -367,12 +386,11 @@ unsafe fn window() -> HWND {
     hwnd
 }
 
-unsafe fn font(dpi: u32, size: i32, bold: bool) -> HFONT {
-    let weight = if bold { FW_SEMIBOLD.0 } else { FW_NORMAL.0 } as i32;
+unsafe fn font(dpi: u32, size: i32, weight: u32, face: windows::core::PCWSTR) -> HFONT {
     CreateFontW(
-        -(size * dpi as i32 / 96), 0, 0, 0, weight, 0, 0, 0,
+        -(size * dpi as i32 / 96), 0, 0, 0, weight as i32, 0, 0, 0,
         DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32,
-        CLEARTYPE_QUALITY.0 as u32, 0, w!("Segoe UI"),
+        CLEARTYPE_QUALITY.0 as u32, 0, face,
     )
 }
 
@@ -400,6 +418,33 @@ impl Layout {
     fn row_rect(&self, j: usize) -> RECT {
         let top = self.header + j as i32 * self.row;
         RECT { left: 0, top, right: self.w, bottom: top + self.row }
+    }
+    /// Slim scrollbar along the right edge of the list.
+    fn track(&self) -> RECT {
+        RECT {
+            left: self.w - self.px(11),
+            top: self.header + self.px(8),
+            right: self.w - self.px(5),
+            bottom: self.header + self.body - self.px(8),
+        }
+    }
+    /// The handle: as tall as the visible share of the list, at the scroll position.
+    fn thumb(&self, total: usize, scroll: usize) -> RECT {
+        let t = self.track();
+        let track_h = t.bottom - t.top;
+        let h = ((track_h as f32) * MAX_ROWS as f32 / total.max(1) as f32) as i32;
+        let h = h.max(self.px(28)).min(track_h);
+        let max = total.saturating_sub(MAX_ROWS);
+        let top = if max == 0 { t.top } else { t.top + ((track_h - h) as f32 * scroll as f32 / max as f32).round() as i32 };
+        RECT { left: t.left, top, right: t.right, bottom: top + h }
+    }
+    /// Scroll position for a handle whose top edge is at `top`.
+    fn scroll_for(&self, total: usize, top: i32) -> usize {
+        let t = self.track();
+        let h = self.thumb(total, 0).bottom - t.top;
+        let room = (t.bottom - t.top - h).max(1);
+        let max = total.saturating_sub(MAX_ROWS);
+        (((top - t.top) as f32 / room as f32) * max as f32).round().clamp(0.0, max as f32) as usize
     }
     fn remove_rect(&self, j: usize) -> RECT {
         let r = self.row_rect(j);
@@ -435,6 +480,15 @@ fn hit(s: &State, x: i32, y: i32) -> Hit {
     let l = layout(s);
     if inside(&l.close, x, y) {
         return Hit::Close;
+    }
+    if s.rows.len() > MAX_ROWS {
+        let t = l.track();
+        // A generous target, wider than the drawn bar.
+        let zone = RECT { left: t.left - l.px(5), top: t.top, right: l.w, bottom: t.bottom };
+        if inside(&zone, x, y) {
+            let th = l.thumb(s.rows.len(), s.scroll);
+            return if y >= th.top && y < th.bottom { Hit::Thumb } else { Hit::Track };
+        }
     }
     for j in 0..l.visible {
         if inside(&l.remove_rect(j), x, y) {
@@ -472,6 +526,14 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 let (x, y) = point(lp);
                 let (changed, start_tracking) = STATE.with(|s| {
                     let Ok(mut s) = s.try_borrow_mut() else { return (false, false) };
+                    if let Some(grab) = s.dragging {
+                        let l = layout(&s);
+                        let next = l.scroll_for(s.rows.len(), y - grab);
+                        let changed = next != s.scroll;
+                        s.scroll = next;
+                        s.last_activity = Instant::now();
+                        return (changed, false);
+                    }
                     let h = hit(&s, x, y);
                     let changed = h != s.hover;
                     s.hover = h;
@@ -505,7 +567,7 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 LRESULT(0)
             }
             WM_SETCURSOR => {
-                let on_button = STATE.with(|s| s.try_borrow().map(|s| s.hover != Hit::Nothing).unwrap_or(false));
+                let on_button = STATE.with(|s| s.try_borrow().map(|s| s.hover.is_button()).unwrap_or(false));
                 if on_button {
                     SetCursor(LoadCursorW(None, IDC_HAND).unwrap_or_default());
                     LRESULT(1)
@@ -513,15 +575,47 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                     DefWindowProcW(hwnd, msg, wp, lp)
                 }
             }
+            WM_LBUTTONDOWN => {
+                let (x, y) = point(lp);
+                let grabbed = STATE.with(|s| {
+                    let Ok(mut s) = s.try_borrow_mut() else { return false };
+                    let l = layout(&s);
+                    let th = l.thumb(s.rows.len(), s.scroll);
+                    match hit(&s, x, y) {
+                        Hit::Thumb => {
+                            s.dragging = Some(y - th.top);
+                            true
+                        }
+                        Hit::Track => {
+                            // Jump a page towards the click.
+                            let max = s.rows.len().saturating_sub(MAX_ROWS);
+                            s.scroll = if y < th.top { s.scroll.saturating_sub(MAX_ROWS) } else { (s.scroll + MAX_ROWS).min(max) };
+                            false
+                        }
+                        _ => false,
+                    }
+                });
+                if grabbed {
+                    SetCapture(hwnd);
+                }
+                let _ = InvalidateRect(hwnd, None, false);
+                LRESULT(0)
+            }
             WM_LBUTTONUP => {
                 let (x, y) = point(lp);
+                let was_dragging = STATE.with(|s| s.borrow_mut().dragging.take().is_some());
+                if was_dragging {
+                    let _ = ReleaseCapture();
+                    let _ = InvalidateRect(hwnd, None, false);
+                    return LRESULT(0);
+                }
                 let clicked = STATE.with(|s| s.try_borrow().map(|s| hit(&s, x, y)).unwrap_or(Hit::Nothing));
                 match clicked {
                     Hit::Close => hide(),
                     Hit::Remove(id) => STATE.with(|s| s.borrow_mut().action = Some(Action::Remove(id))),
                     Hit::Clear => STATE.with(|s| s.borrow_mut().action = Some(Action::ClearAll)),
                     Hit::Send => STATE.with(|s| s.borrow_mut().action = Some(Action::SendAll)),
-                    Hit::Nothing => {}
+                    Hit::Thumb | Hit::Track | Hit::Nothing => {}
                 }
                 LRESULT(0)
             }
@@ -593,6 +687,19 @@ unsafe fn round(hdc: HDC, r: &RECT, fill_c: COLORREF, border: Option<COLORREF>, 
     }
 }
 
+/// A crisp "x" drawn with lines, centred in `r` (font glyphs look fuzzy at this size).
+unsafe fn draw_x(hdc: HDC, r: &RECT, c: COLORREF, size: i32, thickness: i32) {
+    let (cx, cy, half) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2, size / 2);
+    let pen = CreatePen(PS_SOLID, thickness.max(1), c);
+    let old = SelectObject(hdc, pen);
+    let _ = MoveToEx(hdc, cx - half, cy - half, None);
+    let _ = LineTo(hdc, cx + half, cy + half);
+    let _ = MoveToEx(hdc, cx + half, cy - half, None);
+    let _ = LineTo(hdc, cx - half, cy + half);
+    SelectObject(hdc, old);
+    let _ = DeleteObject(pen);
+}
+
 unsafe fn text(hdc: HDC, s: &str, r: RECT, font: HFONT, c: COLORREF, flags: DRAW_TEXT_FORMAT) {
     let old = SelectObject(hdc, font);
     SetTextColor(hdc, c);
@@ -607,7 +714,7 @@ unsafe fn paint(hwnd: HWND) {
     let hdc = BeginPaint(hwnd, &mut ps);
     STATE.with(|s| {
         let Ok(s) = s.try_borrow() else { return };
-        let Some([f_title, f_body, f_small]) = s.fonts else { return };
+        let Some([f_title, f_button, f_meta, f_number]) = s.fonts else { return };
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
         let l = layout(&s);
@@ -625,13 +732,13 @@ unsafe fn paint(hwnd: HWND) {
         if s.hover == Hit::Close {
             round(mem, &l.close, c.hover, None, l.px(8));
         }
-        text(mem, "\u{2715}", l.close, f_body, if s.hover == Hit::Close { c.text } else { c.muted }, DT_CENTER);
+        draw_x(mem, &l.close, if s.hover == Hit::Close { c.text } else { c.muted }, l.px(10), (l.px(3) / 2).max(2));
         fill(mem, &RECT { left: 0, top: l.header - l.p, right: w, bottom: l.header }, c.border);
 
         // Rows (or the empty state)
         if s.rows.is_empty() {
             let mid = l.header + l.body / 2;
-            text(mem, &s.hint, RECT { left: pad, top: mid - l.px(12), right: w - pad, bottom: mid + l.px(12) }, f_small, c.muted, DT_CENTER | DT_END_ELLIPSIS);
+            text(mem, &s.hint, RECT { left: pad, top: mid - l.px(12), right: w - pad, bottom: mid + l.px(12) }, f_meta, c.muted, DT_CENTER | DT_END_ELLIPSIS);
         }
         for j in 0..l.visible {
             let row = &s.rows[s.scroll + j];
@@ -642,7 +749,7 @@ unsafe fn paint(hwnd: HWND) {
             }
             // Thumbnail, centred in its box
             let num = RECT { left: pad, top: rr.top, right: pad + l.px(18), bottom: rr.bottom };
-            text(mem, &(s.scroll + j + 1).to_string(), num, f_body, c.muted, DT_LEFT);
+            text(mem, &(s.scroll + j + 1).to_string(), num, f_number, c.muted, DT_LEFT);
             let tl = num.right + l.px(8);
             let tb = RECT { left: tl, top: rr.top + (l.row - l.px(THUMB_H)) / 2, right: tl + l.px(THUMB_W), bottom: rr.top + (l.row + l.px(THUMB_H)) / 2 };
             fill(mem, &tb, c.thumb_bg);
@@ -657,11 +764,20 @@ unsafe fn paint(hwnd: HWND) {
             }
             let tx = tb.right + l.px(12);
             let rb = l.remove_rect(j);
-            text(mem, &row.time, RECT { left: tx, top: rr.top, right: rb.left - l.px(8), bottom: rr.bottom }, f_small, c.muted, DT_LEFT);
+            text(mem, &row.time, RECT { left: tx, top: rr.top, right: rb.left - l.px(8), bottom: rr.bottom }, f_meta, c.muted, DT_LEFT);
             if remove_hover {
                 round(mem, &rb, c.bg, None, l.px(8));
             }
-            text(mem, "\u{2715}", rb, f_body, if remove_hover { c.danger } else { c.muted }, DT_CENTER);
+            draw_x(mem, &rb, if remove_hover { c.danger } else { c.muted }, l.px(9), (l.px(3) / 2).max(2));
+        }
+
+        // Scrollbar, only when there's more than fits
+        if s.rows.len() > MAX_ROWS {
+            let t = l.track();
+            let radius = t.right - t.left;
+            round(mem, &t, c.border, None, radius);
+            let active = s.dragging.is_some() || matches!(s.hover, Hit::Thumb | Hit::Track);
+            round(mem, &l.thumb(s.rows.len(), s.scroll), if active { c.muted } else { c.outline }, None, radius);
         }
 
         // Footer
@@ -670,11 +786,11 @@ unsafe fn paint(hwnd: HWND) {
         let enabled = !s.rows.is_empty();
         let clear_fill = if enabled && s.hover == Hit::Clear { c.hover } else { c.bg };
         round(mem, &l.clear, clear_fill, Some(c.outline), l.px(10));
-        text(mem, "Clear", l.clear, f_body, if enabled { c.text } else { c.disabled_text }, DT_CENTER);
+        text(mem, "Clear", l.clear, f_button, if enabled { c.text } else { c.disabled_text }, DT_CENTER);
         let send_fill = if !enabled { c.disabled_fill } else if s.hover == Hit::Send { c.primary_hover } else { c.primary };
         round(mem, &l.send, send_fill, None, l.px(10));
         let label = "Send";
-        text(mem, label, l.send, f_body, if enabled { c.on_primary } else { c.disabled_text }, DT_CENTER);
+        text(mem, label, l.send, f_button, if enabled { c.on_primary } else { c.disabled_text }, DT_CENTER);
 
         // A light pop-up needs an edge to stand out on white pages.
         outline(mem, &rc, c.outline, l.pad);
