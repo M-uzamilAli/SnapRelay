@@ -7,16 +7,17 @@ use std::mem::size_of;
 use std::sync::Once;
 
 use windows::core::w;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDIBSection,
-    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FrameRect, InvalidateRect, SelectObject,
+    CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, FrameRect, InvalidateRect,
+    ScreenToClient, SelectObject, HDC,
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, PAINTSTRUCT, SRCCOPY,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetForegroundWindow,
     GetMessageW, LoadCursorW, RegisterClassW, SetForegroundWindow, ShowWindow, TranslateMessage,
     HMENU, IDC_CROSS, MSG, SW_SHOW, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WNDCLASSW, WS_EX_TOOLWINDOW,
@@ -75,6 +76,11 @@ pub fn select_area(area: RECT, w: u32, h: u32, bgra: &[u8]) -> Option<RECT> {
             cleanup();
             return None;
         };
+        // Start the guide lines where the mouse already is.
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_ok() && ScreenToClient(hwnd, &mut pt).as_bool() {
+            STATE.with(|s| s.borrow_mut().cur = (pt.x, pt.y));
+        }
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(hwnd);
@@ -129,6 +135,20 @@ unsafe fn make_bitmap(w: u32, h: u32, bgra: &[u8]) -> Option<HBITMAP> {
     Some(bmp)
 }
 
+/// Full-width guide lines through the mouse: white with a dark outline, so they
+/// stay visible on any colour. (Windows' own crosshair inverts the colours under
+/// it, which makes it vanish on the mid-grey of a dimmed white page.)
+unsafe fn draw_guides(hdc: HDC, (x, y): (i32, i32), w: i32, h: i32) {
+    let dark = CreateSolidBrush(COLORREF(0x0020_2020));
+    let light = CreateSolidBrush(COLORREF(0x00FF_FFFF));
+    FillRect(hdc, &RECT { left: 0, top: y - 1, right: w, bottom: y + 2 }, dark);
+    FillRect(hdc, &RECT { left: x - 1, top: 0, right: x + 2, bottom: h }, dark);
+    FillRect(hdc, &RECT { left: 0, top: y, right: w, bottom: y + 1 }, light);
+    FillRect(hdc, &RECT { left: x, top: 0, right: x + 1, bottom: h }, light);
+    let _ = DeleteObject(dark);
+    let _ = DeleteObject(light);
+}
+
 fn point(lp: LPARAM) -> (i32, i32) {
     ((lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32)
 }
@@ -151,14 +171,9 @@ extern "system" fn select_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
-                let dragging = STATE.with(|s| {
-                    let mut s = s.borrow_mut();
-                    s.cur = point(lp);
-                    s.start.is_some()
-                });
-                if dragging {
-                    let _ = InvalidateRect(hwnd, None, false);
-                }
+                // Repaint on every move so the guide lines follow the mouse.
+                STATE.with(|s| s.borrow_mut().cur = point(lp));
+                let _ = InvalidateRect(hwnd, None, false);
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -198,12 +213,13 @@ extern "system" fn select_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         let r = normalized(start, s.cur);
                         SelectObject(src, s.bright);
                         let _ = BitBlt(buf_dc, r.left, r.top, r.right - r.left, r.bottom - r.top, src, r.left, r.top, SRCCOPY);
-                        let border = CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00F1_8B81)); // soft indigo
+                        let border = CreateSolidBrush(COLORREF(0x00F1_8B81)); // soft indigo
                         FrameRect(buf_dc, &r, border);
                         let inner = RECT { left: r.left + 1, top: r.top + 1, right: r.right - 1, bottom: r.bottom - 1 };
                         FrameRect(buf_dc, &inner, border);
                         let _ = DeleteObject(border);
                     }
+                    draw_guides(buf_dc, s.cur, s.w, s.h);
                     let _ = BitBlt(hdc, 0, 0, s.w, s.h, buf_dc, 0, 0, SRCCOPY);
                     SelectObject(src, old_src);
                     let _ = DeleteDC(src);

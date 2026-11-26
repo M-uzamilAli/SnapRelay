@@ -149,14 +149,16 @@ pub fn promise(owner: HWND, png: &[u8]) -> Result<(), String> {
     }
 }
 
-/// Wait until an app from `target_app` pulls the image (the signal), or give up.
-/// On timeout, returns whoever else pulled it, if anyone.
-pub fn wait_for_read(owner: HWND, is_target: &impl Fn(u32) -> bool, timeout: Duration) -> Result<Read, Vec<Read>> {
+/// Wait until the target app pulls the image after `since` (our Ctrl+V), or give up.
+/// Readers that don't identify themselves (pid 0; Chrome-based apps read this way)
+/// count only after our Ctrl+V: background sync tools read before it.
+/// On timeout, returns everyone who pulled it, if anyone.
+pub fn wait_for_read(owner: HWND, is_target: &impl Fn(u32) -> bool, since: Instant, timeout: Duration) -> Result<Read, Vec<Read>> {
     let start = Instant::now();
     loop {
         pump(owner);
         let reads = PROMISE.with(|p| p.borrow().reads.clone());
-        if let Some(r) = reads.iter().find(|r| r.pid == 0 || is_target(r.pid)) {
+        if let Some(r) = reads.iter().find(|r| r.at >= since && (r.pid == 0 || is_target(r.pid))) {
             return Ok(r.clone());
         }
         if start.elapsed() > timeout {

@@ -213,7 +213,7 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
             }
             let sent = Instant::now();
             send_ctrl_v();
-            match clipboard::wait_for_read(owner, &is_target, READ_WAIT) {
+            match clipboard::wait_for_read(owner, &is_target, sent, READ_WAIT) {
                 Ok(read) => {
                     taken = Some((read, sent, attempt));
                     break;
@@ -243,9 +243,10 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
                 buf.mark(id, Status::Delivered);
                 delivered += 1;
                 let tries = if attempt > 1 { format!(" on try {attempt}") } else { String::new() };
+                let who = if read.pid == 0 { "an unnamed reader".to_string() } else { app_name(read.pid) };
                 println!(
-                    "  #{id}: taken by {} as {} after {} ms{tries}   (readers: {readers})",
-                    target.app, read.format, read.at.saturating_duration_since(sent).as_millis()
+                    "  #{id}: taken by {who} as {} {} ms after Ctrl+V{tries}   (all readers: {readers})",
+                    read.format, read.at.saturating_duration_since(sent).as_millis()
                 );
             }
             None => {
@@ -269,7 +270,11 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
 
 /// Everyone who pulled the current image, for the log ("chrome.exe, msrdc.exe").
 fn readers_list() -> String {
-    let mut names: Vec<String> = clipboard::reads().iter().map(|r| app_name(r.pid)).collect();
+    let mut names: Vec<String> = clipboard::reads()
+        .iter()
+        .map(|r| if r.pid == 0 { "unnamed reader".to_string() } else { app_name(r.pid) })
+        .collect();
+    names.sort();
     names.dedup();
     if names.is_empty() { "none".into() } else { names.join(", ") }
 }
