@@ -87,7 +87,7 @@ fn main() {
         (MOD_WIN | MOD_SHIFT, VK_X, "Win+Shift+X"),
     ])
     .unwrap_or("(none)");
-    let queue_key = register(HK_QUEUE, "open or close the queue window", &[
+    let _queue_key = register(HK_QUEUE, "open or close the queue window", &[
         (MOD_WIN | MOD_SHIFT, VK_Q, "Win+Shift+Q"),
         (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_Q, "Ctrl+Alt+Shift+Q"),
     ]);
@@ -96,13 +96,7 @@ fn main() {
         full_key.unwrap_or("-"), area_key.unwrap_or("-")
     ));
     println!("Close this window (or Ctrl+C) to quit. Screenshots are kept in memory only.\n");
-    notice::show(
-        &format!(
-            "SnapRelay ready\n{} area  \u{00B7}  {} full screen  \u{00B7}  {} paste  \u{00B7}  {} queue",
-            area_key.unwrap_or("-"), full_key.unwrap_or("-"), release_key, queue_key.unwrap_or("-")
-        ),
-        4000,
-    );
+    // No start-up notice: the tray icon is the only sign SnapRelay is running.
 
     let mut buf = buffer::Buffer::default();
     let mut msg = MSG::default();
