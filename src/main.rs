@@ -76,6 +76,10 @@ fn main() {
         (MOD_WIN | MOD_SHIFT, VK_Q, "Win+Shift+Q"),
         (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_Q, "Ctrl+Alt+Shift+Q"),
     ]);
+    queue::set_hint(format!(
+        "{} screen  \u{00B7}  {} area",
+        full_key.unwrap_or("-"), area_key.unwrap_or("-")
+    ));
     println!("Close this window (or Ctrl+C) to quit. Screenshots are kept in memory only.\n");
     notice::show(
         &format!(
@@ -113,7 +117,7 @@ fn main() {
                     let (n, _) = buf.summary();
                     buf.clear();
                     println!("Cleared the queue ({n} screenshot(s)).");
-                    notice::show(&format!("Cleared {n} screenshot(s)"), 1800);
+                    notice::show(&format!("Cleared {n}"), 1500);
                 }
                 queue::Action::SendAll => {
                     // The pop-up never took focus, so the chat box still has it.
@@ -166,7 +170,7 @@ fn capture(buf: &mut buffer::Buffer, pick_area: bool) {
                 "Captured #{id}: {w}x{h}, {kb} KB in {} ms. Queue: {pending} pending, {} KB in memory.",
                 t.elapsed().as_millis(), bytes / 1024
             );
-            notice::show(&format!("Captured \u{00B7} {pending} in queue"), 1800);
+            notice::show(&format!("Captured \u{00B7} {pending} queued"), 1500);
         }
         Err(e) => {
             println!("Capture failed: {e}");

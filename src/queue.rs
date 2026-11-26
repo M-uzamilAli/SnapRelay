@@ -1,8 +1,9 @@
 //! Queue window (Win+Shift+Q): a compact pop-up in the bottom-right corner listing
-//! what's queued, with a remove button per screenshot, "Clear all" and "Send all".
+//! what's queued (numbered 1, 2, 3 by position), with a remove button per
+//! screenshot, "Clear" and "Send".
 //!
 //! It never takes focus (like the on-screen keyboard), so the chat box keeps its
-//! cursor and "Send all" can paste straight into it. Mouse only.
+//! cursor and "Send" can paste straight into it. Mouse only.
 //!
 //! The window doesn't change the queue itself: a click records an Action, and the
 //! Application Controller (main loop) carries it out, then calls `sync`.
@@ -53,7 +54,7 @@ pub enum Action {
 
 // Sizes in 96-dpi units, scaled to the monitor.
 const WIDTH: i32 = 360;
-const HEADER: i32 = 60;
+const HEADER: i32 = 52;
 const ROW: i32 = 72;
 const FOOTER: i32 = 64;
 const PAD: i32 = 16;
@@ -88,8 +89,8 @@ enum Hit {
 
 struct Row {
     id: u32,
-    label: String,
-    meta: String,
+    /// Capture time, "20:41". The row's number is its position, worked out when drawn.
+    time: String,
     thumb: Option<(HBITMAP, i32, i32)>,
 }
 
@@ -102,7 +103,9 @@ struct State {
     scroll: usize,
     hover: Hit,
     tracking: bool,
-    header_meta: String,
+    title: String,
+    /// Shortcuts that actually registered, shown when the queue is empty.
+    hint: String,
     action: Option<Action>,
     fonts: Option<[HFONT; 3]>, // title, body, small
 }
@@ -111,7 +114,7 @@ impl Default for State {
     fn default() -> Self {
         State {
             hwnd: None, open: false, dpi: 96, rows: Vec::new(), seen_version: u64::MAX, scroll: 0,
-            hover: Hit::Nothing, tracking: false, header_meta: String::new(), action: None, fonts: None,
+            hover: Hit::Nothing, tracking: false, title: String::new(), hint: String::new(), action: None, fonts: None,
         }
     }
 }
@@ -128,6 +131,11 @@ pub fn toggle(buf: &Buffer) {
     } else {
         show(buf);
     }
+}
+
+/// The capture shortcuts that are really active (they may be fallbacks).
+pub fn set_hint(hint: String) {
+    STATE.with(|s| s.borrow_mut().hint = hint);
 }
 
 pub fn is_open() -> bool {
@@ -225,8 +233,7 @@ fn rebuild(buf: &Buffer) {
             });
             Row {
                 id: shot.id,
-                label: format!("#{}  \u{00B7}  {}\u{00D7}{}", shot.id, shot.frame.width, shot.frame.height),
-                meta: format!("{}  \u{00B7}  {} KB", shot.time, shot.frame.png.len() / 1024),
+                time: shot.time.clone(),
                 thumb,
             }
         })
@@ -236,13 +243,13 @@ fn rebuild(buf: &Buffer) {
             let _ = DeleteObject(b);
         }
     }
-    let (count, bytes) = buf.summary();
+    let count = buf.summary().0;
     STATE.with(|s| {
         let mut s = s.borrow_mut();
-        s.header_meta = if count > MAX_ROWS {
-            format!("{count} queued  \u{00B7}  {:.1} MB  \u{00B7}  scroll for more", bytes as f32 / 1_048_576.0)
-        } else {
-            format!("{count} queued  \u{00B7}  {:.1} MB", bytes as f32 / 1_048_576.0)
+        s.title = match count {
+            0 => "Nothing queued".into(),
+            1 => "1 screenshot".into(),
+            n => format!("{n} screenshots"),
         };
         s.scroll = s.scroll.min(count.saturating_sub(MAX_ROWS));
         s.rows = rows;
@@ -360,9 +367,9 @@ fn layout(s: &State) -> Layout {
     let fy = p(HEADER) + body + p(14);
     Layout {
         w, h, pad, header: p(HEADER), row: p(ROW), body, visible,
-        close: RECT { left: w - pad - p(BUTTON), top: p(16), right: w - pad, bottom: p(16) + p(BUTTON) },
-        clear: RECT { left: pad, top: fy, right: pad + p(100), bottom: fy + p(36) },
-        send: RECT { left: w - pad - p(156), top: fy, right: w - pad, bottom: fy + p(36) },
+        close: RECT { left: w - pad - p(BUTTON), top: (p(HEADER) - p(BUTTON)) / 2, right: w - pad, bottom: (p(HEADER) + p(BUTTON)) / 2 },
+        clear: RECT { left: pad, top: fy, right: pad + p(88), bottom: fy + p(36) },
+        send: RECT { left: w - pad - p(120), top: fy, right: w - pad, bottom: fy + p(36) },
         p: p(1).max(1),
         dpi,
     }
@@ -533,8 +540,7 @@ unsafe fn paint(hwnd: HWND) {
 
         // Header
         let (pad, w) = (l.pad, l.w);
-        text(mem, "SnapRelay queue", RECT { left: pad, top: l.px(12), right: w - pad * 3, bottom: l.px(34) }, f_title, TEXT, DT_LEFT);
-        text(mem, &s.header_meta, RECT { left: pad, top: l.px(34), right: w - pad, bottom: l.px(52) }, f_small, MUTED, DT_LEFT | DT_END_ELLIPSIS);
+        text(mem, &s.title, RECT { left: pad, top: 0, right: l.close.left - l.px(8), bottom: l.header }, f_title, TEXT, DT_LEFT | DT_END_ELLIPSIS);
         if s.hover == Hit::Close {
             round(mem, &l.close, HOVER, None, l.px(8));
         }
@@ -544,8 +550,7 @@ unsafe fn paint(hwnd: HWND) {
         // Rows (or the empty state)
         if s.rows.is_empty() {
             let mid = l.header + l.body / 2;
-            text(mem, "Queue is empty", RECT { left: 0, top: mid - l.px(22), right: w, bottom: mid }, f_body, TEXT, DT_CENTER);
-            text(mem, "Capture with Win+Shift+A or Win+Shift+Z", RECT { left: 0, top: mid, right: w, bottom: mid + l.px(20) }, f_small, MUTED, DT_CENTER);
+            text(mem, &s.hint, RECT { left: pad, top: mid - l.px(12), right: w - pad, bottom: mid + l.px(12) }, f_small, MUTED, DT_CENTER | DT_END_ELLIPSIS);
         }
         for j in 0..l.visible {
             let row = &s.rows[s.scroll + j];
@@ -555,7 +560,10 @@ unsafe fn paint(hwnd: HWND) {
                 fill(mem, &rr, HOVER);
             }
             // Thumbnail, centred in its box
-            let tb = RECT { left: pad, top: rr.top + (l.row - l.px(THUMB_H)) / 2, right: pad + l.px(THUMB_W), bottom: rr.top + (l.row + l.px(THUMB_H)) / 2 };
+            let num = RECT { left: pad, top: rr.top, right: pad + l.px(18), bottom: rr.bottom };
+            text(mem, &(s.scroll + j + 1).to_string(), num, f_body, MUTED, DT_LEFT);
+            let tl = num.right + l.px(8);
+            let tb = RECT { left: tl, top: rr.top + (l.row - l.px(THUMB_H)) / 2, right: tl + l.px(THUMB_W), bottom: rr.top + (l.row + l.px(THUMB_H)) / 2 };
             fill(mem, &tb, THUMB_BG);
             if let Some((tbmp, tw, th)) = row.thumb {
                 let src = CreateCompatibleDC(mem);
@@ -568,8 +576,7 @@ unsafe fn paint(hwnd: HWND) {
             }
             let tx = tb.right + l.px(12);
             let rb = l.remove_rect(j);
-            text(mem, &row.label, RECT { left: tx, top: rr.top + l.px(16), right: rb.left - l.px(8), bottom: rr.top + l.px(36) }, f_body, TEXT, DT_LEFT | DT_END_ELLIPSIS);
-            text(mem, &row.meta, RECT { left: tx, top: rr.top + l.px(37), right: rb.left - l.px(8), bottom: rr.top + l.px(56) }, f_small, MUTED, DT_LEFT | DT_END_ELLIPSIS);
+            text(mem, &row.time, RECT { left: tx, top: rr.top, right: rb.left - l.px(8), bottom: rr.bottom }, f_small, MUTED, DT_LEFT);
             if remove_hover {
                 round(mem, &rb, BG, None, l.px(8));
             }
@@ -582,11 +589,11 @@ unsafe fn paint(hwnd: HWND) {
         let enabled = !s.rows.is_empty();
         let clear_fill = if enabled && s.hover == Hit::Clear { HOVER } else { BG };
         round(mem, &l.clear, clear_fill, Some(BORDER), l.px(10));
-        text(mem, "Clear all", l.clear, f_body, if enabled { TEXT } else { DISABLED_TEXT }, DT_CENTER);
+        text(mem, "Clear", l.clear, f_body, if enabled { TEXT } else { DISABLED_TEXT }, DT_CENTER);
         let send_fill = if !enabled { DISABLED_FILL } else if s.hover == Hit::Send { PRIMARY_HOVER } else { PRIMARY };
         round(mem, &l.send, send_fill, None, l.px(10));
-        let label = if enabled { format!("Send all ({})", s.rows.len()) } else { "Send all".into() };
-        text(mem, &label, l.send, f_body, if enabled { ON_PRIMARY } else { DISABLED_TEXT }, DT_CENTER);
+        let label = "Send";
+        text(mem, label, l.send, f_body, if enabled { ON_PRIMARY } else { DISABLED_TEXT }, DT_CENTER);
 
         let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old_bmp);

@@ -183,7 +183,7 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
     let pending = buf.pending_ids();
     if pending.is_empty() {
         println!("Nothing to release: the queue has no pending screenshots.");
-        notice::show("Nothing to send: the queue is empty", 2500);
+        notice::show("Nothing queued", 2000);
         return;
     }
     wait_for_modifiers_released();
@@ -195,7 +195,7 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
         Err(why) => {
             println!("Not pasting: {why}.");
             println!("  Click into the chat box, then press release again. {total} screenshot(s) still queued.");
-            notice::show(&format!("Click into the chat box first. {total} still queued."), 4000);
+            notice::show("Click into the chat box first", 3000);
             return;
         }
     };
@@ -226,7 +226,7 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
             println!("  Stopped: {why}. Remaining screenshots stay queued.");
             break;
         }
-        notice::show(&format!("Sending {} of {total} to {}...", n + 1, target.app), 5000);
+        notice::show(&format!("Sending {} of {total}\u{2026}", n + 1), 5000);
         let shot = buf.get(id).expect("pending id exists");
         if let Err(e) = clipboard::promise(owner, &shot.frame.png) {
             println!("  #{id}: clipboard failed ({e}). Kept in queue.");
@@ -293,10 +293,10 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
         started.elapsed().as_millis(), bytes / 1024
     );
     if kept == 0 {
-        notice::show(&format!("\u{2713} {delivered} of {total} delivered to {}", target.app), 3000);
+        notice::show(&format!("\u{2713} Sent {delivered}"), 2500);
     } else {
         notice::show(
-            &format!("{delivered} of {total} delivered. {kept} kept in queue. Press {release_key} to retry"),
+            &format!("Sent {delivered} of {total}. {kept} still queued \u{00B7} {release_key} to retry"),
             6000,
         );
     }
