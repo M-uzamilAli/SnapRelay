@@ -27,8 +27,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const HIDE_TIMER: usize = 1;
-const BG: COLORREF = COLORREF(0x0073_320A); // 0x00BBGGRR: brand Deep Navy #0A3273
-const FG: COLORREF = COLORREF(0x00FF_FFFF); // Pure White
+const BG: COLORREF = COLORREF(0x0025_281C); // 0x00BBGGRR: brand Slate-Forest #1C2825
+const FG: COLORREF = COLORREF(0x00F4_F6F5); // Linen #F5F6F4
 
 thread_local! {
     static WINDOW: Cell<Option<HWND>> = const { Cell::new(None) };

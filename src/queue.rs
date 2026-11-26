@@ -68,21 +68,56 @@ const MAX_ROWS: usize = 6;
 const IDLE_SECS: u64 = 8;
 const IDLE_TIMER: usize = 7;
 
-// Brand colours (0x00BBGGRR). Light surface per the SnapRelay palette:
-// Frost White / Soft Ice surfaces, Deep Navy text, Electric Blue action.
-const BG: COLORREF = COLORREF(0x00FF_FFFF); // Pure White
-const HOVER: COLORREF = COLORREF(0x00FB_F6F1); // faint Frost White
-const BORDER: COLORREF = COLORREF(0x00F2_E6DA); // Frost White #DAE6F2
-const OUTLINE: COLORREF = COLORREF(0x00DB_B08D); // Soft Ice #8DB0DB
-const TEXT: COLORREF = COLORREF(0x0073_320A); // Deep Navy #0A3273
-const MUTED: COLORREF = COLORREF(0x0069_5547); // Slate #475569
-const PRIMARY: COLORREF = COLORREF(0x00C4_671E); // Electric Blue #1E67C4
-const PRIMARY_HOVER: COLORREF = COLORREF(0x00AA_5518); // Royal Blue #1855AA
-const ON_PRIMARY: COLORREF = COLORREF(0x00FF_FFFF);
-const DANGER: COLORREF = COLORREF(0x0043_43D1); // muted red, for remove
-const THUMB_BG: COLORREF = COLORREF(0x00F2_E6DA); // Frost White
-const DISABLED_FILL: COLORREF = COLORREF(0x00F9_F3EE);
-const DISABLED_TEXT: COLORREF = COLORREF(0x00BC_A89A);
+// Brand colours (0x00BBGGRR), one set per Windows theme.
+// Slate-Forest / Linen surfaces, sage + eucalyptus edges, Warm Champagne for "Send"
+// (the relay-to-AI action).
+struct Colors {
+    bg: COLORREF,
+    hover: COLORREF,
+    border: COLORREF,
+    outline: COLORREF,
+    text: COLORREF,
+    muted: COLORREF,
+    primary: COLORREF,
+    primary_hover: COLORREF,
+    on_primary: COLORREF,
+    danger: COLORREF,
+    thumb_bg: COLORREF,
+    disabled_fill: COLORREF,
+    disabled_text: COLORREF,
+}
+
+const DARK: Colors = Colors {
+    bg: COLORREF(0x0025_281C),            // Slate-Forest #1C2825
+    hover: COLORREF(0x002F_3324),         // #24332F
+    border: COLORREF(0x003B_402E),        // #2E403B
+    outline: COLORREF(0x006C_784B),       // Muted Sage #4B786C
+    text: COLORREF(0x00F4_F6F5),          // Linen #F5F6F4
+    muted: COLORREF(0x00B2_B8A9),         // #A9B8B2
+    primary: COLORREF(0x0084_C3E5),       // Warm Champagne #E5C384
+    primary_hover: COLORREF(0x00A0_D3ED), // #EDD3A0
+    on_primary: COLORREF(0x0025_281C),    // Slate-Forest
+    danger: COLORREF(0x006E_7AE0),        // #E07A6E
+    thumb_bg: COLORREF(0x001B_1D14),      // #141D1B
+    disabled_fill: COLORREF(0x002F_3324),
+    disabled_text: COLORREF(0x006B_715E), // #5E716B
+};
+
+const LIGHT: Colors = Colors {
+    bg: COLORREF(0x00F4_F6F5),            // Linen #F5F6F4
+    hover: COLORREF(0x00E8_ECEA),         // Stone #EAECE8
+    border: COLORREF(0x00DE_E3E0),        // #E0E3DE
+    outline: COLORREF(0x0094_A07A),       // Pale Eucalyptus #7AA094
+    text: COLORREF(0x0025_281C),          // Slate-Forest #1C2825
+    muted: COLORREF(0x0066_6B5A),         // #5A6B66
+    primary: COLORREF(0x0084_C3E5),       // Warm Champagne #E5C384
+    primary_hover: COLORREF(0x006E_B6DD), // #DDB66E
+    on_primary: COLORREF(0x0025_281C),    // Slate-Forest
+    danger: COLORREF(0x003D_48B5),        // #B5483D
+    thumb_bg: COLORREF(0x00E8_ECEA),      // Stone
+    disabled_fill: COLORREF(0x00EC_F0EE), // #EEF0EC
+    disabled_text: COLORREF(0x00A9_ADA3), // #A3ADA9
+};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Hit {
@@ -115,13 +150,15 @@ struct State {
     action: Option<Action>,
     fonts: Option<[HFONT; 3]>, // title, body, small
     last_activity: Instant,
+    /// Follows the Windows light/dark setting, read each time the window opens.
+    light: bool,
 }
 
 impl Default for State {
     fn default() -> Self {
         State {
             hwnd: None, open: false, dpi: 96, rows: Vec::new(), seen_version: u64::MAX, scroll: 0,
-            hover: Hit::Nothing, tracking: false, title: String::new(), hint: String::new(), action: None, fonts: None, last_activity: Instant::now(),
+            hover: Hit::Nothing, tracking: false, title: String::new(), hint: String::new(), action: None, fonts: None, last_activity: Instant::now(), light: true,
         }
     }
 }
@@ -195,6 +232,7 @@ pub fn show(buf: &Buffer) {
             s.hover = Hit::Nothing;
             s.open = true;
             s.last_activity = Instant::now();
+            s.light = crate::theme::is_light();
         });
     }
     rebuild(buf);
@@ -573,40 +611,41 @@ unsafe fn paint(hwnd: HWND) {
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
         let l = layout(&s);
+        let c = if s.light { &LIGHT } else { &DARK };
         // Draw off-screen, then copy once: no flicker.
         let mem = CreateCompatibleDC(hdc);
         let bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
         let old_bmp = SelectObject(mem, bmp);
         SetBkMode(mem, TRANSPARENT);
-        fill(mem, &rc, BG);
+        fill(mem, &rc, c.bg);
 
         // Header
         let (pad, w) = (l.pad, l.w);
-        text(mem, &s.title, RECT { left: pad, top: 0, right: l.close.left - l.px(8), bottom: l.header }, f_title, TEXT, DT_LEFT | DT_END_ELLIPSIS);
+        text(mem, &s.title, RECT { left: pad, top: 0, right: l.close.left - l.px(8), bottom: l.header }, f_title, c.text, DT_LEFT | DT_END_ELLIPSIS);
         if s.hover == Hit::Close {
-            round(mem, &l.close, HOVER, None, l.px(8));
+            round(mem, &l.close, c.hover, None, l.px(8));
         }
-        text(mem, "\u{2715}", l.close, f_body, if s.hover == Hit::Close { TEXT } else { MUTED }, DT_CENTER);
-        fill(mem, &RECT { left: 0, top: l.header - l.p, right: w, bottom: l.header }, BORDER);
+        text(mem, "\u{2715}", l.close, f_body, if s.hover == Hit::Close { c.text } else { c.muted }, DT_CENTER);
+        fill(mem, &RECT { left: 0, top: l.header - l.p, right: w, bottom: l.header }, c.border);
 
         // Rows (or the empty state)
         if s.rows.is_empty() {
             let mid = l.header + l.body / 2;
-            text(mem, &s.hint, RECT { left: pad, top: mid - l.px(12), right: w - pad, bottom: mid + l.px(12) }, f_small, MUTED, DT_CENTER | DT_END_ELLIPSIS);
+            text(mem, &s.hint, RECT { left: pad, top: mid - l.px(12), right: w - pad, bottom: mid + l.px(12) }, f_small, c.muted, DT_CENTER | DT_END_ELLIPSIS);
         }
         for j in 0..l.visible {
             let row = &s.rows[s.scroll + j];
             let rr = l.row_rect(j);
             let remove_hover = s.hover == Hit::Remove(row.id);
             if remove_hover {
-                fill(mem, &rr, HOVER);
+                fill(mem, &rr, c.hover);
             }
             // Thumbnail, centred in its box
             let num = RECT { left: pad, top: rr.top, right: pad + l.px(18), bottom: rr.bottom };
-            text(mem, &(s.scroll + j + 1).to_string(), num, f_body, MUTED, DT_LEFT);
+            text(mem, &(s.scroll + j + 1).to_string(), num, f_body, c.muted, DT_LEFT);
             let tl = num.right + l.px(8);
             let tb = RECT { left: tl, top: rr.top + (l.row - l.px(THUMB_H)) / 2, right: tl + l.px(THUMB_W), bottom: rr.top + (l.row + l.px(THUMB_H)) / 2 };
-            fill(mem, &tb, THUMB_BG);
+            fill(mem, &tb, c.thumb_bg);
             if let Some((tbmp, tw, th)) = row.thumb {
                 let src = CreateCompatibleDC(mem);
                 let old = SelectObject(src, tbmp);
@@ -618,27 +657,27 @@ unsafe fn paint(hwnd: HWND) {
             }
             let tx = tb.right + l.px(12);
             let rb = l.remove_rect(j);
-            text(mem, &row.time, RECT { left: tx, top: rr.top, right: rb.left - l.px(8), bottom: rr.bottom }, f_small, MUTED, DT_LEFT);
+            text(mem, &row.time, RECT { left: tx, top: rr.top, right: rb.left - l.px(8), bottom: rr.bottom }, f_small, c.muted, DT_LEFT);
             if remove_hover {
-                round(mem, &rb, BG, None, l.px(8));
+                round(mem, &rb, c.bg, None, l.px(8));
             }
-            text(mem, "\u{2715}", rb, f_body, if remove_hover { DANGER } else { MUTED }, DT_CENTER);
+            text(mem, "\u{2715}", rb, f_body, if remove_hover { c.danger } else { c.muted }, DT_CENTER);
         }
 
         // Footer
         let ft = l.header + l.body;
-        fill(mem, &RECT { left: 0, top: ft, right: w, bottom: ft + l.p }, BORDER);
+        fill(mem, &RECT { left: 0, top: ft, right: w, bottom: ft + l.p }, c.border);
         let enabled = !s.rows.is_empty();
-        let clear_fill = if enabled && s.hover == Hit::Clear { HOVER } else { BG };
-        round(mem, &l.clear, clear_fill, Some(OUTLINE), l.px(10));
-        text(mem, "Clear", l.clear, f_body, if enabled { TEXT } else { DISABLED_TEXT }, DT_CENTER);
-        let send_fill = if !enabled { DISABLED_FILL } else if s.hover == Hit::Send { PRIMARY_HOVER } else { PRIMARY };
+        let clear_fill = if enabled && s.hover == Hit::Clear { c.hover } else { c.bg };
+        round(mem, &l.clear, clear_fill, Some(c.outline), l.px(10));
+        text(mem, "Clear", l.clear, f_body, if enabled { c.text } else { c.disabled_text }, DT_CENTER);
+        let send_fill = if !enabled { c.disabled_fill } else if s.hover == Hit::Send { c.primary_hover } else { c.primary };
         round(mem, &l.send, send_fill, None, l.px(10));
         let label = "Send";
-        text(mem, label, l.send, f_body, if enabled { ON_PRIMARY } else { DISABLED_TEXT }, DT_CENTER);
+        text(mem, label, l.send, f_body, if enabled { c.on_primary } else { c.disabled_text }, DT_CENTER);
 
         // A light pop-up needs an edge to stand out on white pages.
-        outline(mem, &rc, OUTLINE, l.pad);
+        outline(mem, &rc, c.outline, l.pad);
         let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old_bmp);
         let _ = DeleteObject(bmp);

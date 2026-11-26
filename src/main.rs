@@ -9,6 +9,7 @@ mod notice;
 mod queue;
 mod release;
 mod select;
+mod theme;
 
 use std::time::Instant;
 

@@ -214,7 +214,7 @@ extern "system" fn select_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
                         let r = normalized(start, s.cur);
                         SelectObject(src, s.bright);
                         let _ = BitBlt(buf_dc, r.left, r.top, r.right - r.left, r.bottom - r.top, src, r.left, r.top, SRCCOPY);
-                        let border = CreateSolidBrush(COLORREF(0x00C4_671E)); // brand Electric Blue #1E67C4
+                        let border = CreateSolidBrush(COLORREF(0x0084_C3E5)); // brand Warm Champagne #E5C384
                         FrameRect(buf_dc, &r, border);
                         let inner = RECT { left: r.left + 1, top: r.top + 1, right: r.right - 1, bottom: r.bottom - 1 };
                         FrameRect(buf_dc, &inner, border);
