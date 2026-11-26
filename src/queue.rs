@@ -17,13 +17,12 @@ use std::time::{Duration, Instant};
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
-    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
-    GetMonitorInfoW, GetStockObject, InvalidateRect, LineTo, MonitorFromPoint, MoveToEx, RoundRect, SelectObject,
-    SetBkMode, SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect,
+    GetMonitorInfoW, InvalidateRect, MonitorFromPoint, SelectObject,
+    SetBkMode, SetTextColor, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
     DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
     DT_SINGLELINE, DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, HBITMAP, HDC, HFONT, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST, NULL_BRUSH, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY,
+    MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY,
     TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -332,9 +331,9 @@ fn rebuild(buf: &Buffer) {
 /// Size the window for its rows. On first show, put it in the bottom-right corner
 /// above the taskbar; afterwards keep its bottom-right corner where it is.
 fn place(first: bool) {
-    let Some((hwnd, l)) = STATE.with(|s| {
+    let Some((hwnd, l, light)) = STATE.with(|s| {
         let s = s.borrow();
-        s.hwnd.map(|h| (h, layout(&s)))
+        s.hwnd.map(|h| (h, layout(&s), s.light))
     }) else {
         return;
     };
@@ -352,7 +351,8 @@ fn place(first: bool) {
             (r.right, r.bottom)
         };
         let _ = SetWindowPos(hwnd, HWND_TOPMOST, right - l.w, bottom - l.h, l.w, l.h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, l.w + 1, l.h + 1, l.pad, l.pad), true);
+        // Smooth corners and a 1px edge, drawn by Windows itself.
+        crate::smooth::round_corners(hwnd, Some(if light { LIGHT.outline } else { DARK.outline }));
         let _ = InvalidateRect(hwnd, None, false);
     }
 }
@@ -660,45 +660,19 @@ unsafe fn fill(hdc: HDC, r: &RECT, c: COLORREF) {
     let _ = DeleteObject(b);
 }
 
-/// A 1px rounded border with no fill.
-unsafe fn outline(hdc: HDC, r: &RECT, c: COLORREF, radius: i32) {
-    let pen = CreatePen(PS_SOLID, 1, c);
-    let old_p = SelectObject(hdc, pen);
-    let old_b = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    let _ = RoundRect(hdc, r.left, r.top, r.right, r.bottom, radius, radius);
-    SelectObject(hdc, old_p);
-    SelectObject(hdc, old_b);
-    let _ = DeleteObject(pen);
+/// Smooth rounded rectangle. `corner` is the corner's diameter.
+unsafe fn round(hdc: HDC, r: &RECT, fill_c: COLORREF, border: Option<COLORREF>, corner: i32) {
+    crate::smooth::rounded(hdc, r, corner as f32 / 2.0, fill_c, border);
 }
 
-unsafe fn round(hdc: HDC, r: &RECT, fill_c: COLORREF, border: Option<COLORREF>, radius: i32) {
-    let brush = CreateSolidBrush(fill_c);
-    let pen = border.map(|c| CreatePen(PS_SOLID, 1, c));
-    let old_b = SelectObject(hdc, brush);
-    let old_p = match pen {
-        Some(p) => SelectObject(hdc, p),
-        None => SelectObject(hdc, GetStockObject(NULL_PEN)),
-    };
-    let _ = RoundRect(hdc, r.left, r.top, r.right, r.bottom, radius, radius);
-    SelectObject(hdc, old_b);
-    SelectObject(hdc, old_p);
-    let _ = DeleteObject(brush);
-    if let Some(p) = pen {
-        let _ = DeleteObject(p);
-    }
-}
-
-/// A crisp "x" drawn with lines, centred in `r` (font glyphs look fuzzy at this size).
+/// A smooth "x" with round ends, centred in `r`.
 unsafe fn draw_x(hdc: HDC, r: &RECT, c: COLORREF, size: i32, thickness: i32) {
-    let (cx, cy, half) = ((r.left + r.right) / 2, (r.top + r.bottom) / 2, size / 2);
-    let pen = CreatePen(PS_SOLID, thickness.max(1), c);
-    let old = SelectObject(hdc, pen);
-    let _ = MoveToEx(hdc, cx - half, cy - half, None);
-    let _ = LineTo(hdc, cx + half, cy + half);
-    let _ = MoveToEx(hdc, cx + half, cy - half, None);
-    let _ = LineTo(hdc, cx - half, cy + half);
-    SelectObject(hdc, old);
-    let _ = DeleteObject(pen);
+    let cx = (r.left + r.right) as f32 / 2.0;
+    let cy = (r.top + r.bottom) as f32 / 2.0;
+    let half = size as f32 / 2.0;
+    let width = thickness as f32 * 0.8;
+    crate::smooth::line(hdc, (cx - half, cy - half), (cx + half, cy + half), c, width);
+    crate::smooth::line(hdc, (cx + half, cy - half), (cx - half, cy + half), c, width);
 }
 
 unsafe fn text(hdc: HDC, s: &str, r: RECT, font: HFONT, c: COLORREF, flags: DRAW_TEXT_FORMAT) {
@@ -793,8 +767,6 @@ unsafe fn paint(hwnd: HWND) {
         let label = "Send";
         text(mem, label, l.send, f_button, if enabled { c.on_primary } else { c.disabled_text }, DT_CENTER);
 
-        // A light pop-up needs an edge to stand out on white pages.
-        outline(mem, &rc, c.outline, l.pad);
         let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old_bmp);
         let _ = DeleteObject(bmp);

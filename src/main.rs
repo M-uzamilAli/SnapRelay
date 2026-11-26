@@ -14,6 +14,7 @@ mod notice;
 mod queue;
 mod release;
 mod select;
+mod smooth;
 mod theme;
 mod tray;
 

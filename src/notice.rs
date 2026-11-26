@@ -9,9 +9,9 @@ use std::sync::Once;
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, DeleteObject, DrawTextW,
+    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW,
     EndPaint, FillRect, GetDC, GetMonitorInfoW, InvalidateRect, MonitorFromPoint, ReleaseDC,
-    SelectObject, SetBkMode, SetTextColor, SetWindowRgn, UpdateWindow, CLEARTYPE_QUALITY,
+    SelectObject, SetBkMode, SetTextColor, UpdateWindow, CLEARTYPE_QUALITY,
     CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK, FW_SEMIBOLD,
     HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT, TRANSPARENT,
 };
@@ -83,7 +83,7 @@ pub fn show(text: &str, ms: u32) {
             let _ = MoveWindow(hwnd, x, y, w, h, false);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
-        SetWindowRgn(hwnd, CreateRoundRectRgn(0, 0, w + 1, h + 1, px(14), px(14)), true);
+        crate::smooth::round_corners(hwnd, None); // smooth corners, drawn by Windows
         let _ = InvalidateRect(hwnd, None, true);
         let _ = UpdateWindow(hwnd); // paint now, even if we're busy releasing
         SetTimer(hwnd, HIDE_TIMER, ms, None);
