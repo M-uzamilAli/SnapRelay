@@ -40,6 +40,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::buffer::Buffer;
 use crate::capture;
+use crate::fonts::{REGULAR_FACE, SEMIBOLD_FACE};
 use crate::select::make_bitmap;
 
 /// Sent when the mouse leaves the window (after TrackMouseEvent).
@@ -234,12 +235,12 @@ pub fn show(buf: &Buffer) {
         let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
         let (mut dpi, mut _y) = (96u32, 96u32);
         let _ = GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dpi, &mut _y);
-        // Windows 11's interface font: "Display" cut for the title, "Text" cut for the rest.
+        // Inter (built in, see fonts.rs): SemiBold for structure, Regular for details.
         let fonts = [
-            font(dpi, 16, FW_SEMIBOLD.0, w!("Segoe UI Variable Display")), // title
-            font(dpi, 14, FW_SEMIBOLD.0, w!("Segoe UI Variable Text")),    // buttons
-            font(dpi, 13, FW_NORMAL.0, w!("Segoe UI Variable Text")),      // time, hint
-            font(dpi, 12, FW_SEMIBOLD.0, w!("Segoe UI Variable Text")),    // row number
+            font(dpi, 16, FW_SEMIBOLD.0, SEMIBOLD_FACE), // title
+            font(dpi, 14, FW_SEMIBOLD.0, SEMIBOLD_FACE), // buttons
+            font(dpi, 13, FW_NORMAL.0, REGULAR_FACE),    // time, hint
+            font(dpi, 12, FW_SEMIBOLD.0, SEMIBOLD_FACE), // row number
         ];
         STATE.with(|s| {
             let mut s = s.borrow_mut();

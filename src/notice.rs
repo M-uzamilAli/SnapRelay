@@ -95,7 +95,7 @@ unsafe fn make_font(dpi: u32) -> HFONT {
         -(14 * dpi as i32 / 96), 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
         DEFAULT_CHARSET.0 as u32, OUT_DEFAULT_PRECIS.0 as u32, CLIP_DEFAULT_PRECIS.0 as u32,
         CLEARTYPE_QUALITY.0 as u32, 0,
-        w!("Segoe UI Variable Text"),
+        crate::fonts::SEMIBOLD_FACE,
     )
 }
 

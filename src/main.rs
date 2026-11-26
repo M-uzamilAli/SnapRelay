@@ -9,6 +9,7 @@ mod buffer;
 mod capture;
 mod clipboard;
 mod feedback;
+mod fonts;
 mod notice;
 mod queue;
 mod release;
@@ -68,6 +69,9 @@ fn main() {
     }
     let uia: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
         .expect("Windows accessibility layer (UI Automation) is unavailable");
+    if !fonts::load() {
+        println!("Couldn't load the built-in Inter font; Windows will substitute one.");
+    }
     let owner = clipboard::create_owner_window();
     tray::create();
 
