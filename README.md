@@ -2,9 +2,9 @@
 
 **Capture anywhere. Queue for a moment. Release into your AI chat.**
 
-SnapRelay is a small Windows utility for people who work with AI chat apps all day. Take screenshots from any app with a hotkey, let them pile up in a queue, then send them all into your ChatGPT conversation at once — no switching back and forth after every screenshot.
+SnapRelay is a small Windows utility for people who work with AI chat apps all day. Take screenshots from any app with a hotkey, let them pile up in a queue, then send them all into your chat at once. No switching back and forth after every screenshot.
 
-> **Status: design stage.** There is no code yet. The pictures below are mockups of the intended app, not screenshots of a working one. The full design is in [`docs.txt`](docs.txt) (working title there: *Visual Context Bridge*).
+> **Status: working prototype.** Capture, the in-memory queue and release into a chat box work today, in ChatGPT, Claude, WhatsApp and VS Code, with no app-specific code. There is no queue window yet: the app runs in a console that logs what it does, and shows small on-screen notices. The original design is in [`docs.txt`](docs.txt) (working title there: *Visual Context Bridge*).
 
 <p align="center">
   <img src="docs/assets/flow.svg" alt="Four steps: capture, queue, switch, release" width="880">
@@ -23,83 +23,112 @@ Today, sharing what's on your screen with an AI chat looks like this, once per s
 
 With five screenshots, that's five round trips. SnapRelay turns it into one: capture as many as you like while you work, switch to the chat once, and release them together.
 
-## What it looks like
+## Try it
 
-### The queue pop-up
+Needs Windows 10/11 and [Rust](https://rustup.rs) (with the Visual Studio C++ build tools).
 
-Everything you've captured waits in a small pop-up that opens from the Windows tray (the icons near the clock).
+```powershell
+cargo run
+```
+
+Then:
+
+1. Press **Win+Shift+A** and drag a box, or **Win+Shift+Z** for the whole screen. You hear a short shutter sound, the area flashes, and a notice says *"Captured · 3 in queue"*.
+2. Click into the chat's message box (ChatGPT, Claude, WhatsApp, …).
+3. Press **Win+Shift+V**. The notice counts *"Sending 2 of 3…"* and ends with *"✓ 3 of 3 delivered"*.
+
+## Shortcuts
+
+| Shortcut | What it does | If it's taken |
+|---|---|---|
+| `Win + Shift + A` | Capture an area: the screen freezes and dims, drag a box, Esc or right-click cancels | falls back to `Ctrl + Alt + Shift + A` |
+| `Win + Shift + Z` | Capture the whole monitor under the mouse | falls back to `Ctrl + Alt + Shift + Z` |
+| `Win + Shift + V` | Paste the queue into the text box you clicked into | falls back to `Win + Shift + X` |
+| `Win + Shift + Q` | Open the queue window | *not built yet* |
+
+Windows gives each shortcut to whichever program claims it first. If another tool (PowerToys, AutoHotkey, …) already owns one, SnapRelay uses the fallback and says so at startup. Free the key in that tool and restart SnapRelay to get it back.
+
+## How releasing works
+
+SnapRelay never needs to know which chat app you're using. It only talks to Windows:
+
+1. **Find the box.** It asks Windows' accessibility layer *"what has focus, and is it a text box?"*. Apps that hide their text box from Windows (WhatsApp shows up as an unnamed pane) are treated as *unknown*: SnapRelay tries, and step 3 tells it whether that worked.
+2. **Offer the image.** Instead of putting the image on the clipboard, it puts a *promise* there (*"ask me when you need it"*), then presses Ctrl+V.
+3. **Wait for the app to take it.** When the app pastes, Windows asks SnapRelay for the image. That request is the signal that the paste landed, usually 10–300 ms later, so SnapRelay moves straight on to the next one. There's no fixed waiting.
+4. **Never lose a screenshot.** If the app doesn't take it, SnapRelay presses Ctrl+V again (up to 3 tries; this can't create duplicates, because an app can only get the image by asking SnapRelay). If it still isn't taken, the screenshot stays queued and the notice tells you.
+
+```mermaid
+sequenceDiagram
+    actor You
+    participant SR as SnapRelay
+    participant Clip as Windows clipboard
+    participant Chat as Chat app
+
+    You->>SR: Win+Shift+V
+    SR->>SR: is the focused element a text box?
+    loop each queued screenshot
+        SR->>Clip: promise: "I have an image"
+        SR->>Chat: Ctrl+V
+        Chat->>Clip: give me the image
+        Clip->>SR: someone wants it, now
+        SR->>Clip: here it is
+        SR->>SR: delivered: free its memory, next one
+    end
+    SR-->>You: "✓ 3 of 3 delivered"
+```
+
+Delivered screenshots are removed from memory right away; only the ones still waiting stay queued. Screenshots are kept out of Windows' clipboard history (Win+V) and never touch the disk.
+
+## How it's built
+
+One small Rust program running in the background, with five parts, each with one job:
+
+```mermaid
+flowchart TD
+    You([You: hotkeys]) --> AC[Application Controller<br/><i>registers hotkeys, routes them</i>]
+    AC --> CE[Capture Engine<br/><i>copies the screen, area select,<br/>compresses to PNG</i>]
+    AC --> RC[Release Controller<br/><i>finds the text box, pastes,<br/>waits for the app to take it</i>]
+    CE -->|new screenshot| CB[(Context Buffer<br/><i>queue in memory</i>)]
+    RC -->|reads, then removes delivered| CB
+    CE --> FB[Feedback<br/><i>sound, flash, notices</i>]
+    RC --> FB
+    RC -->|what has focus?| UIA[Windows accessibility layer]
+    RC -->|promise + Ctrl+V| CHAT[Chat app's text box]
+```
+
+| Part | Where it lives |
+|---|---|
+| Application Controller | `src/main.rs` |
+| Capture Engine | `src/capture.rs`, `src/select.rs` (area selection) |
+| Context Buffer | `src/buffer.rs` |
+| Release Controller | `src/release.rs`, `src/clipboard.rs` (the clipboard promise) |
+| Feedback | `src/feedback.rs` (sound, flash), `src/notice.rs` (on-screen notices) |
+
+## Things learned along the way
+
+- **Chat boxes aren't Windows controls.** In Chrome-based apps the message box is drawn by the app; Windows only knows about it because the app *describes* it through the accessibility layer. That shared description, not a shared component, is what makes one generic paste work everywhere.
+- **No Alt in the paste shortcut.** SnapRelay swallows the letter, so the app sees a lone Alt press and jumps to its menu bar, stealing focus from the text box.
+- **Other programs read your clipboard.** Clipboard sync tools (WSL's `msrdc.exe`, PowerToys Mouse Without Borders) grab every new item. SnapRelay ignores their reads, lets them finish, and only counts the chat app taking the image.
+
+## The queue window (next)
+
+The plan for **Win+Shift+Q**: a small pop-up from the tray to see what's queued, remove single screenshots, clear everything, and pick what to send. *This picture is still a mockup.*
 
 <p align="center">
   <img src="docs/assets/queue-popup.svg" alt="Mockup of the queue pop-up with four screenshots and their statuses" width="880">
 </p>
 
-### Releasing into the chat
-
-SnapRelay pastes the screenshots into the chat's message box one at a time and checks each paste. Anything it can't confirm stays in the queue so you can retry it. Nothing is lost silently.
-
-<p align="center">
-  <img src="docs/assets/release.svg" alt="Mockup of a release: three screenshots attached, one kept in the queue" width="880">
-</p>
-
-## Shortcuts
-
-| Shortcut | What it does |
-|---|---|
-| `Win + Shift + A` | Capture a region you select |
-| `Win + Shift + Z` | Quick capture of the whole screen |
-| `Ctrl + Shift + Q` | Open the queue pop-up |
-| *to be decided* | Release the queue into the chat |
-
-## How it's built
-
-One small Rust program that runs in the background. Screenshots are kept in memory only and never written to disk. It has five parts, each with one job:
-
-```mermaid
-flowchart TD
-    You([You: hotkeys]) --> AC[Application Controller<br/><i>coordinates, does no heavy work</i>]
-    AC --> CE[Capture Engine<br/><i>grabs and compresses</i>]
-    AC --> RC[Release Controller<br/><i>pastes and checks</i>]
-    CE -->|new screenshot| CB[(Context Buffer<br/><i>holds images in memory</i>)]
-    RC -->|reads images,<br/>updates status| CB
-    CB -->|queue changed| QU[Queue pop-up<br/><i>shows, removes, selects</i>]
-    QU -->|your commands| AC
-    CE --> WIN[Windows<br/>screen capture]
-    RC --> CHAT[AI chat app<br/>ChatGPT first]
-```
-
-What happens when you release:
-
-```mermaid
-sequenceDiagram
-    actor You
-    participant App as SnapRelay
-    participant Clip as Windows clipboard
-    participant Chat as ChatGPT
-
-    You->>App: Release
-    loop each selected screenshot
-        App->>Clip: put the image on the clipboard
-        App->>Chat: paste
-        Chat-->>App: took it? attached?
-        App->>App: mark attached, or keep it in the queue
-    end
-    App-->>You: "3 of 4 attached"
-```
-
-## Scope of the first version
-
-**In:** region and quick capture · in-memory queue · queue pop-up with remove and clear · release into one chat app (ChatGPT), one paste at a time · a status for every screenshot · measuring CPU and memory use.
-
-**Out for now:** OCR · editing or annotating · cloud sync · saved history · several chat apps at once.
-
 ## Roadmap
 
-- [ ] **1. Capture prototype** — hotkeys, region selection, screen capture, compression
-- [ ] **2. Queue in memory** — store, remove, clear, enforce a size limit
-- [ ] **3. Queue pop-up** — thumbnails, count, remove, clear all
-- [ ] **4. Release** — clipboard, paste, check each paste, keep failures
-- [ ] **5. End-to-end check** — real workflow, reliability, CPU and memory
+- [x] **1. Capture**: hotkeys, whole screen, area selection, PNG compression, sound + flash
+- [x] **2. Queue in memory**: store, free each screenshot once delivered
+- [x] **4. Release**: clipboard promise, wait for the app to take each image, retries, never lose a screenshot
+- [x] On-screen notices for capture and release
+- [ ] **3. Queue window** (Win+Shift+Q): thumbnails, remove, clear all, select
+- [ ] Tray icon instead of a console window
+- [ ] Memory limit for the queue
+- [ ] Faster capture with Windows Graphics Capture
 
 ## Tech
 
-Rust · Windows 10/11 · `windows-rs` for Windows APIs · Windows Graphics Capture for screenshots · `egui` for the pop-up (first choice) · native Windows clipboard.
+Rust · Windows 10/11 · [`windows`](https://crates.io/crates/windows) crate for Windows APIs · [`png`](https://crates.io/crates/png) for compression · Windows UI Automation (accessibility layer) to find the text box · delayed-rendering clipboard for the delivery signal.

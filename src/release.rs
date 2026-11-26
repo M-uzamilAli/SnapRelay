@@ -26,7 +26,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 
-use crate::buffer::{Buffer, Status};
+use crate::buffer::Buffer;
 use crate::clipboard;
 use crate::notice;
 
@@ -270,7 +270,7 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
         let readers = readers_list();
         match taken {
             Some((read, sent, attempt)) => {
-                buf.mark(id, Status::Delivered);
+                buf.remove(id); // delivered: free its memory right away
                 delivered += 1;
                 let tries = if attempt > 1 { format!(" on try {attempt}") } else { String::new() };
                 let who = if read.pid == 0 { "an unnamed reader".to_string() } else { app_name(read.pid) };
@@ -287,7 +287,11 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND, release_key: 
     }
 
     let kept = total - delivered;
-    println!("Release finished in {} ms: {delivered} of {total} delivered.", started.elapsed().as_millis());
+    let (left, bytes) = buf.summary();
+    println!(
+        "Release finished in {} ms: {delivered} of {total} delivered. Queue: {left} left, {} KB in memory.",
+        started.elapsed().as_millis(), bytes / 1024
+    );
     if kept == 0 {
         notice::show(&format!("\u{2713} {delivered} of {total} delivered to {}", target.app), 3000);
     } else {

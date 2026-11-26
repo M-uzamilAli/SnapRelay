@@ -130,7 +130,7 @@ fn capture(buf: &mut buffer::Buffer, pick_area: bool) {
         Ok(frame) => {
             let (w, h, kb) = (frame.width, frame.height, frame.png.len() / 1024);
             let id = buf.add(frame);
-            let (pending, _, bytes) = buf.summary();
+            let (pending, bytes) = buf.summary();
             println!(
                 "Captured #{id}: {w}x{h}, {kb} KB in {} ms. Queue: {pending} pending, {} KB in memory.",
                 t.elapsed().as_millis(), bytes / 1024
