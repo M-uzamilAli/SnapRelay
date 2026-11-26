@@ -5,8 +5,8 @@ use crate::capture::Frame;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
     Pending,
-    /// Ctrl+V was sent. Not yet verified that the app attached it.
-    Pasted,
+    /// The target app pulled the image from the clipboard after our Ctrl+V.
+    Delivered,
 }
 
 pub struct Shot {

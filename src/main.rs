@@ -3,22 +3,20 @@
 
 mod buffer;
 mod capture;
+mod clipboard;
 mod feedback;
 mod release;
 
 use std::time::Instant;
 
-use windows::core::w;
-use windows::Win32::Foundation::{HINSTANCE, HWND};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetMessageW, HMENU, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_HOTKEY,
-};
+use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, TranslateMessage, MSG, WM_HOTKEY};
 
 const HK_CAPTURE: i32 = 1;
 const HK_RELEASE: i32 = 2;
@@ -50,14 +48,7 @@ fn main() {
     }
     let uia: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
         .expect("Windows accessibility layer (UI Automation) is unavailable");
-    // An invisible window that owns our clipboard data.
-    let owner = unsafe {
-        CreateWindowExW(
-            WINDOW_EX_STYLE(0), w!("STATIC"), w!("SnapRelay"), WINDOW_STYLE(0),
-            0, 0, 0, 0, HWND_MESSAGE, HMENU::default(), HINSTANCE::default(), None,
-        )
-    }
-    .expect("couldn't create the clipboard owner window");
+    let owner = clipboard::create_owner_window();
 
     println!("SnapRelay prototype. Shortcuts:");
     register_with_fallback(HK_CAPTURE, "capture the screen under the mouse", &[
@@ -76,6 +67,10 @@ fn main() {
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) }.0 > 0 {
         if msg.message != WM_HOTKEY {
+            unsafe {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
             continue;
         }
         match msg.wParam.0 as i32 {

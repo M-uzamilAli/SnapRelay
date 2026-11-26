@@ -1,16 +1,13 @@
 //! Release Controller: finds the focused text box (generic, any app),
-//! then pastes each pending screenshot via clipboard + Ctrl+V.
+//! then pastes each pending screenshot via a clipboard promise + Ctrl+V,
+//! moving on as soon as the app pulls the image.
 
 use std::mem::size_of;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use windows::core::{w, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
-use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
-};
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::core::PWSTR;
+use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
@@ -22,15 +19,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
     KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
-use windows::Win32::Graphics::Gdi::{BITMAPINFOHEADER, BI_RGB};
 
 use crate::buffer::{Buffer, Status};
-use crate::capture::decode_to_bgra_bottom_up;
+use crate::clipboard;
 
-const CF_DIB: u32 = 8;
 const VK_V: VIRTUAL_KEY = VIRTUAL_KEY(0x56);
-/// Time we give the app to read the clipboard before we replace it with the next image.
-const GAP_BETWEEN_PASTES: Duration = Duration::from_millis(700);
+/// If the app hasn't pulled the image by then, the paste didn't land.
+const READ_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// What Windows told us about the focused element.
 pub struct Target {
@@ -161,6 +156,7 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND) {
     }
     wait_for_modifiers_released();
 
+    let started = Instant::now();
     let target = match focused_text_box(uia) {
         Ok(t) => t,
         Err(why) => {
@@ -188,16 +184,36 @@ pub fn release(buf: &mut Buffer, uia: &IUIAutomation, owner: HWND) {
             }
         }
         let shot = buf.get(id).expect("pending id exists");
-        if let Err(e) = put_image_on_clipboard(owner, &shot.frame.png) {
+        if let Err(e) = clipboard::promise(owner, &shot.frame.png) {
             println!("  #{id}: clipboard failed ({e}). Kept in queue.");
             return;
         }
+        let sent = Instant::now();
         send_ctrl_v();
-        sleep(GAP_BETWEEN_PASTES);
-        buf.mark(id, Status::Pasted);
-        println!("  #{id}: pasted (Ctrl+V sent; not yet verified that it attached)");
+        // The signal: the target app pulls the image from us. Any of its processes count
+        // (Chrome-based apps read the clipboard from a different process than the one we see).
+        let is_target = |pid: u32| app_name(pid).eq_ignore_ascii_case(&target.app);
+        match clipboard::wait_for_read(owner, is_target, READ_TIMEOUT) {
+            Ok(read) => {
+                buf.mark(id, Status::Delivered);
+                println!(
+                    "  #{id}: taken by {} as {} after {} ms",
+                    target.app, read.format, read.at.saturating_duration_since(sent).as_millis()
+                );
+            }
+            Err(others) => {
+                println!(
+                    "  #{id}: {} didn't take the image within {} s. Kept in queue; stopping here.",
+                    target.app, READ_TIMEOUT.as_secs()
+                );
+                for o in others {
+                    println!("     (it was read by {} instead)", app_name(o.pid));
+                }
+                return;
+            }
+        }
     }
-    println!("Release finished.");
+    println!("Release finished in {} ms.", started.elapsed().as_millis());
 }
 
 fn send_ctrl_v() {
@@ -217,64 +233,4 @@ fn send_ctrl_v() {
     unsafe {
         SendInput(&inputs, size_of::<INPUT>() as i32);
     }
-}
-
-/// Puts the image on the clipboard in two forms (PNG for apps that prefer it,
-/// DIB for everything else) and marks it to stay out of Win+V clipboard history.
-fn put_image_on_clipboard(owner: HWND, png_bytes: &[u8]) -> Result<(), String> {
-    let (w, h, bgra) = decode_to_bgra_bottom_up(png_bytes)?;
-    let header = BITMAPINFOHEADER {
-        biSize: size_of::<BITMAPINFOHEADER>() as u32,
-        biWidth: w as i32,
-        biHeight: h as i32, // positive = rows bottom-up
-        biPlanes: 1,
-        biBitCount: 32,
-        biCompression: BI_RGB.0,
-        biSizeImage: bgra.len() as u32,
-        ..Default::default()
-    };
-    let header_bytes = unsafe {
-        std::slice::from_raw_parts((&header as *const BITMAPINFOHEADER).cast::<u8>(), size_of::<BITMAPINFOHEADER>())
-    };
-    let mut dib = Vec::with_capacity(header_bytes.len() + bgra.len());
-    dib.extend_from_slice(header_bytes);
-    dib.extend_from_slice(&bgra);
-
-    unsafe {
-        let png_fmt = RegisterClipboardFormatW(w!("PNG"));
-        let no_history = RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing"));
-
-        let mut opened = false;
-        for _ in 0..10 {
-            if OpenClipboard(owner).is_ok() {
-                opened = true;
-                break;
-            }
-            sleep(Duration::from_millis(30)); // another app may be holding it
-        }
-        if !opened {
-            return Err("clipboard is busy".into());
-        }
-        let result = (|| {
-            EmptyClipboard().map_err(|e| e.to_string())?;
-            set_data(png_fmt, png_bytes)?;
-            set_data(CF_DIB, &dib)?;
-            set_data(no_history, &[0, 0, 0, 0])?;
-            Ok(())
-        })();
-        let _ = CloseClipboard();
-        result
-    }
-}
-
-unsafe fn set_data(format: u32, bytes: &[u8]) -> Result<(), String> {
-    let mem = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(|e| e.to_string())?;
-    let dst = GlobalLock(mem);
-    if dst.is_null() {
-        return Err("couldn't lock clipboard memory".into());
-    }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.cast::<u8>(), bytes.len());
-    let _ = GlobalUnlock(mem); // reports an "error" when the lock count reaches zero; that's normal
-    SetClipboardData(format, HANDLE(mem.0)).map_err(|e| e.to_string())?;
-    Ok(())
 }

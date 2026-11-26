@@ -25,3 +25,8 @@ features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ]
+
+# Our own code stays easy to debug; libraries (PNG compression) are compiled
+# optimized even in test builds, which makes capture and release much faster.
+[profile.dev.package."*"]
+opt-level = 3
