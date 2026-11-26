@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::Once;
+use std::time::{Duration, Instant};
 
 use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -22,7 +23,7 @@ use windows::Win32::Graphics::Gdi::{
     SetBkMode, SetTextColor, SetWindowRgn, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
     DEFAULT_CHARSET, DRAW_TEXT_FORMAT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX,
     DT_SINGLELINE, DT_VCENTER, FW_NORMAL, FW_SEMIBOLD, HBITMAP, HDC, HFONT, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY,
+    MONITOR_DEFAULTTONEAREST, NULL_BRUSH, NULL_PEN, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_SOLID, SRCCOPY,
     TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -30,10 +31,10 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, GetWindowRect, LoadCursorW,
-    RegisterClassW, SetCursor, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, HMENU,
+    RegisterClassW, KillTimer, SetCursor, SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, HMENU,
     HWND_TOPMOST, IDC_ARROW, IDC_HAND, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
     WDA_EXCLUDEFROMCAPTURE, WM_ERASEBKGND, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_EX_NOACTIVATE,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -63,20 +64,25 @@ const THUMB_W: i32 = 96;
 const THUMB_H: i32 = 54;
 const BUTTON: i32 = 28;
 const MAX_ROWS: usize = 6;
+/// Close the pop-up after this long without activity (never while the mouse is over it).
+const IDLE_SECS: u64 = 8;
+const IDLE_TIMER: usize = 7;
 
-// Colours, 0x00BBGGRR. Dark, matching the notices.
-const BG: COLORREF = COLORREF(0x001B_1818);
-const HOVER: COLORREF = COLORREF(0x002A_2727);
-const BORDER: COLORREF = COLORREF(0x0046_3F3F);
-const TEXT: COLORREF = COLORREF(0x00F5_F4F4);
-const MUTED: COLORREF = COLORREF(0x00AA_A1A1);
-const PRIMARY: COLORREF = COLORREF(0x00F8_8C81);
-const PRIMARY_HOVER: COLORREF = COLORREF(0x00FC_A5A5);
-const ON_PRIMARY: COLORREF = COLORREF(0x0011_0F0F);
-const DANGER: COLORREF = COLORREF(0x0071_71F8);
-const THUMB_BG: COLORREF = COLORREF(0x0011_0F0F);
-const DISABLED_FILL: COLORREF = COLORREF(0x002A_2727);
-const DISABLED_TEXT: COLORREF = COLORREF(0x005B_5252);
+// Brand colours (0x00BBGGRR). Light surface per the SnapRelay palette:
+// Frost White / Soft Ice surfaces, Deep Navy text, Electric Blue action.
+const BG: COLORREF = COLORREF(0x00FF_FFFF); // Pure White
+const HOVER: COLORREF = COLORREF(0x00FB_F6F1); // faint Frost White
+const BORDER: COLORREF = COLORREF(0x00F2_E6DA); // Frost White #DAE6F2
+const OUTLINE: COLORREF = COLORREF(0x00DB_B08D); // Soft Ice #8DB0DB
+const TEXT: COLORREF = COLORREF(0x0073_320A); // Deep Navy #0A3273
+const MUTED: COLORREF = COLORREF(0x0069_5547); // Slate #475569
+const PRIMARY: COLORREF = COLORREF(0x00C4_671E); // Electric Blue #1E67C4
+const PRIMARY_HOVER: COLORREF = COLORREF(0x00AA_5518); // Royal Blue #1855AA
+const ON_PRIMARY: COLORREF = COLORREF(0x00FF_FFFF);
+const DANGER: COLORREF = COLORREF(0x0043_43D1); // muted red, for remove
+const THUMB_BG: COLORREF = COLORREF(0x00F2_E6DA); // Frost White
+const DISABLED_FILL: COLORREF = COLORREF(0x00F9_F3EE);
+const DISABLED_TEXT: COLORREF = COLORREF(0x00BC_A89A);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Hit {
@@ -108,13 +114,14 @@ struct State {
     hint: String,
     action: Option<Action>,
     fonts: Option<[HFONT; 3]>, // title, body, small
+    last_activity: Instant,
 }
 
 impl Default for State {
     fn default() -> Self {
         State {
             hwnd: None, open: false, dpi: 96, rows: Vec::new(), seen_version: u64::MAX, scroll: 0,
-            hover: Hit::Nothing, tracking: false, title: String::new(), hint: String::new(), action: None, fonts: None,
+            hover: Hit::Nothing, tracking: false, title: String::new(), hint: String::new(), action: None, fonts: None, last_activity: Instant::now(),
         }
     }
 }
@@ -162,6 +169,8 @@ pub fn sync(buf: &Buffer) {
         s.open && s.seen_version != buf.version()
     });
     if changed {
+        // A new capture or removal counts as activity.
+        STATE.with(|s| s.borrow_mut().last_activity = Instant::now());
         rebuild(buf);
         place(false);
     }
@@ -185,10 +194,14 @@ pub fn show(buf: &Buffer) {
             s.scroll = 0;
             s.hover = Hit::Nothing;
             s.open = true;
+            s.last_activity = Instant::now();
         });
     }
     rebuild(buf);
     place(true);
+    if let Some(h) = STATE.with(|s| s.borrow().hwnd) {
+        unsafe { SetTimer(h, IDLE_TIMER, 1000, None) };
+    }
 }
 
 pub fn hide() {
@@ -200,6 +213,7 @@ pub fn hide() {
     });
     unsafe {
         if let Some(h) = hwnd {
+            let _ = KillTimer(h, IDLE_TIMER);
             let _ = ShowWindow(h, SW_HIDE);
         }
         // Thumbnails and fonts only live while the window is open.
@@ -423,6 +437,7 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                     let h = hit(&s, x, y);
                     let changed = h != s.hover;
                     s.hover = h;
+                    s.last_activity = Instant::now();
                     let start = !s.tracking;
                     s.tracking = true;
                     (changed, start)
@@ -476,11 +491,27 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 let delta = ((wp.0 >> 16) & 0xFFFF) as i16;
                 STATE.with(|s| {
                     if let Ok(mut s) = s.try_borrow_mut() {
+                        s.last_activity = Instant::now();
                         let max = s.rows.len().saturating_sub(MAX_ROWS);
                         s.scroll = if delta > 0 { s.scroll.saturating_sub(1) } else { (s.scroll + 1).min(max) };
                     }
                 });
                 let _ = InvalidateRect(hwnd, None, false);
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == IDLE_TIMER => {
+                let idle = STATE.with(|s| {
+                    let Ok(mut s) = s.try_borrow_mut() else { return false };
+                    if s.tracking {
+                        // The mouse is over the pop-up: the user is looking at it.
+                        s.last_activity = Instant::now();
+                        return false;
+                    }
+                    s.last_activity.elapsed() >= Duration::from_secs(IDLE_SECS)
+                });
+                if idle {
+                    hide();
+                }
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -494,6 +525,17 @@ unsafe fn fill(hdc: HDC, r: &RECT, c: COLORREF) {
     let b = CreateSolidBrush(c);
     FillRect(hdc, r, b);
     let _ = DeleteObject(b);
+}
+
+/// A 1px rounded border with no fill.
+unsafe fn outline(hdc: HDC, r: &RECT, c: COLORREF, radius: i32) {
+    let pen = CreatePen(PS_SOLID, 1, c);
+    let old_p = SelectObject(hdc, pen);
+    let old_b = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    let _ = RoundRect(hdc, r.left, r.top, r.right, r.bottom, radius, radius);
+    SelectObject(hdc, old_p);
+    SelectObject(hdc, old_b);
+    let _ = DeleteObject(pen);
 }
 
 unsafe fn round(hdc: HDC, r: &RECT, fill_c: COLORREF, border: Option<COLORREF>, radius: i32) {
@@ -588,13 +630,15 @@ unsafe fn paint(hwnd: HWND) {
         fill(mem, &RECT { left: 0, top: ft, right: w, bottom: ft + l.p }, BORDER);
         let enabled = !s.rows.is_empty();
         let clear_fill = if enabled && s.hover == Hit::Clear { HOVER } else { BG };
-        round(mem, &l.clear, clear_fill, Some(BORDER), l.px(10));
+        round(mem, &l.clear, clear_fill, Some(OUTLINE), l.px(10));
         text(mem, "Clear", l.clear, f_body, if enabled { TEXT } else { DISABLED_TEXT }, DT_CENTER);
         let send_fill = if !enabled { DISABLED_FILL } else if s.hover == Hit::Send { PRIMARY_HOVER } else { PRIMARY };
         round(mem, &l.send, send_fill, None, l.px(10));
         let label = "Send";
         text(mem, label, l.send, f_body, if enabled { ON_PRIMARY } else { DISABLED_TEXT }, DT_CENTER);
 
+        // A light pop-up needs an edge to stand out on white pages.
+        outline(mem, &rc, OUTLINE, l.pad);
         let _ = BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old_bmp);
         let _ = DeleteObject(bmp);
