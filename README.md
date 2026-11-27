@@ -7,6 +7,12 @@ SnapRelay is a small Windows utility for people who work with AI chat apps all d
 > **v0.1.0, first release.** Capture, the queue window and release into a chat box work in ChatGPT, Claude, WhatsApp and VS Code, with no app-specific code. SnapRelay lives in the tray: about 15 MB of memory when idle, and the program itself is under 1 MB. The original design is in [`docs.txt`](docs.txt) (working title there: *Visual Context Bridge*).
 
 <p align="center">
+  <img src="docs/assets/snaprelay-demo.gif" alt="SnapRelay demo: capture while staying on the page, review the queue, then one shortcut sends every screenshot into the chat. 17 tab switches become 1." width="880">
+</p>
+
+<!-- Full demo video (1:36): in GitHub's README editor, drag D:\video\snaprelay-demo-github.mp4 onto this line. -->
+
+<p align="center">
   <img src="docs/assets/flow.svg" alt="Four steps: capture, queue, switch, release" width="880">
 </p>
 
