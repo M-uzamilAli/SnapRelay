@@ -10,8 +10,10 @@ mod capture;
 mod clipboard;
 mod feedback;
 mod fonts;
+mod keys;
 mod notice;
 mod queue;
+mod recording;
 mod release;
 mod select;
 mod smooth;
@@ -36,7 +38,7 @@ const HK_FULL: i32 = 1;
 const HK_AREA: i32 = 2;
 const HK_RELEASE: i32 = 3;
 const HK_QUEUE: i32 = 4;
-const VK_A: u32 = 0x41;
+const VK_D: u32 = 0x44;
 const VK_Q: u32 = 0x51;
 const VK_V: u32 = 0x56;
 const VK_X: u32 = 0x58;
@@ -71,6 +73,7 @@ fn main() {
     }
     let uia: IUIAutomation = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
         .expect("Windows accessibility layer (UI Automation) is unavailable");
+    recording::init();
     if !fonts::load() {
         println!("Couldn't load the built-in Inter font; Windows will substitute one.");
     }
@@ -78,22 +81,23 @@ fn main() {
     tray::create();
 
     println!("SnapRelay prototype. Shortcuts:");
-    let area_key = register(HK_AREA, "capture an area you drag", &[
-        (MOD_WIN | MOD_SHIFT, VK_A, "Win+Shift+A"),
-        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_A, "Ctrl+Alt+Shift+A"),
-    ]);
+    // Z, X, D sit together under the left hand: paste, area, whole screen.
     let full_key = register(HK_FULL, "capture the whole screen under the mouse", &[
-        (MOD_WIN | MOD_SHIFT, VK_Z, "Win+Shift+Z"),
-        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_Z, "Ctrl+Alt+Shift+Z"),
+        (MOD_WIN | MOD_SHIFT, VK_D, "Win+Shift+D"),
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_D, "Ctrl+Alt+Shift+D"),
+    ]);
+    let area_key = register(HK_AREA, "capture an area you drag", &[
+        (MOD_WIN | MOD_SHIFT, VK_X, "Win+Shift+X"),
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_X, "Ctrl+Alt+Shift+X"),
     ]);
     // No Alt here on purpose: a released Alt makes many apps jump to their menu bar,
     // which steals focus from the text box we're about to paste into.
-    let release_key = register(HK_RELEASE, "paste the queue into the focused text box", &[
+    let release_key = register(HK_RELEASE, "paste the ticked screenshots into the focused text box", &[
+        (MOD_WIN | MOD_SHIFT, VK_Z, "Win+Shift+Z"),
         (MOD_WIN | MOD_SHIFT, VK_V, "Win+Shift+V"),
-        (MOD_WIN | MOD_SHIFT, VK_X, "Win+Shift+X"),
     ])
     .unwrap_or("(none)");
-    let _queue_key = register(HK_QUEUE, "open or close the queue window", &[
+    let queue_key = register(HK_QUEUE, "open or close the queue window", &[
         (MOD_WIN | MOD_SHIFT, VK_Q, "Win+Shift+Q"),
         (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_Q, "Ctrl+Alt+Shift+Q"),
     ]);
@@ -112,10 +116,16 @@ fn main() {
         if msg.message == WM_HOTKEY {
             trim = true;
             match msg.wParam.0 as i32 {
-                HK_FULL => capture(&mut buf, false),
-                HK_AREA => capture(&mut buf, true),
-                HK_RELEASE => release::release(&mut buf, &uia, owner, release_key),
-                HK_QUEUE => queue::toggle(&buf),
+                HK_FULL => capture(&mut buf, false, full_key.unwrap_or("")),
+                HK_AREA => capture(&mut buf, true, area_key.unwrap_or("")),
+                HK_RELEASE => {
+                    keys::show(release_key, "Paste into chat");
+                    release::release(&mut buf, &uia, owner, release_key)
+                }
+                HK_QUEUE => {
+                    keys::show(queue_key.unwrap_or(""), "Queue");
+                    queue::toggle(&buf)
+                }
                 _ => {}
             }
         } else {
@@ -164,6 +174,12 @@ fn main() {
         if let Some(action) = tray::take_action() {
             match action {
                 tray::Action::ToggleQueue => queue::toggle(&buf),
+                tray::Action::ToggleRecording => {
+                    let on = !recording::is_on();
+                    recording::set(on);
+                    println!("Recording mode {}.", if on { "on" } else { "off" });
+                    notice::show(if on { "Recording mode on \u{00B7} shortcuts show on screen" } else { "Recording mode off" }, 2500);
+                }
                 tray::Action::Quit => break,
             }
         }
@@ -193,9 +209,13 @@ fn give_back_memory() {
 
 /// Capture Engine hand-off: copy the screen, optionally let the user pick an area,
 /// give feedback, compress, and store in the Context Buffer.
-fn capture(buf: &mut buffer::Buffer, pick_area: bool) {
+fn capture(buf: &mut buffer::Buffer, pick_area: bool, shortcut: &str) {
     let t = Instant::now();
-    let raw = match capture::grab_monitor_under_cursor() {
+    // SnapRelay's own windows never go into the screenshot, even in recording mode.
+    let grabbed = recording::hidden(capture::grab_monitor_under_cursor);
+    // Recording mode: show the shortcut now, after the copy, so it isn't in the picture.
+    keys::show(shortcut, if pick_area { "Capture area" } else { "Capture screen" });
+    let raw = match grabbed {
         Ok(raw) => raw,
         Err(e) => {
             println!("Capture failed: {e}");

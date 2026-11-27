@@ -31,9 +31,9 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 use windows::Win32::UI::WindowsAndMessaging::{WS_EX_LAYERED, 
     CreateWindowExW, DefWindowProcW, GetCursorPos, GetWindowRect, LoadCursorW,
-    RegisterClassW, KillTimer, SetCursor, SetTimer, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, HMENU,
+    RegisterClassW, KillTimer, SetCursor, SetTimer, SetWindowPos, ShowWindow, HMENU,
     HWND_TOPMOST, IDC_ARROW, IDC_HAND, IDC_SIZENS, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
-    WDA_EXCLUDEFROMCAPTURE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -424,11 +424,8 @@ unsafe fn window() -> HWND {
         0, 0, 10, 10, HWND::default(), HMENU::default(), hinst, None,
     )
     .expect("couldn't create the queue window");
-    // Keep SnapRelay's own window out of the screenshots it takes.
-    // (Set SNAPRELAY_VISIBLE_IN_SCREENSHOTS=1 to turn this off, e.g. to take screenshots for docs/tests.)
-    if std::env::var_os("SNAPRELAY_VISIBLE_IN_SCREENSHOTS").is_none() {
-        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-    }
+    // Kept out of screen captures, except in recording mode (see recording.rs).
+    crate::recording::register(hwnd);
     STATE.with(|s| s.borrow_mut().hwnd = Some(hwnd));
     hwnd
 }

@@ -33,9 +33,9 @@ cargo run
 
 Then:
 
-1. Press **Win+Shift+A** and drag a box, or **Win+Shift+Z** for the whole screen. You hear a short shutter sound, the area flashes, and a notice says *"Captured · 3 in queue"*.
+1. Press **Win+Shift+X** and drag a box, or **Win+Shift+D** for the whole screen. You hear a short shutter sound, the area flashes, and a notice says *"Captured · 3 in queue"*.
 2. Click into the chat's message box (ChatGPT, Claude, WhatsApp, …).
-3. Press **Win+Shift+V**. The notice counts *"Sending 2 of 3…"* and ends with *"✓ 3 of 3 delivered"*.
+3. Press **Win+Shift+Z**. The notice counts *"Sending 2 of 3…"* and ends with *"✓ 3 of 3 delivered"*.
 
 ## Shortcuts
 
@@ -64,7 +64,7 @@ sequenceDiagram
     participant Clip as Windows clipboard
     participant Chat as Chat app
 
-    You->>SR: Win+Shift+V
+    You->>SR: Win+Shift+Z
     SR->>SR: is the focused element a text box?
     loop each queued screenshot
         SR->>Clip: promise: "I have an image"

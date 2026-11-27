@@ -19,7 +19,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetCursorPos, KillTimer, RegisterClassW,
-    MoveWindow, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, SetTimer, SetWindowPos, ShowWindow, HMENU,
+    MoveWindow, SetTimer, SetWindowPos, ShowWindow, HMENU,
     HTTRANSPARENT, HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
     SW_SHOWNOACTIVATE, WM_DPICHANGED, WM_NCHITTEST, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
@@ -116,11 +116,8 @@ unsafe fn window() -> HWND {
         0, 0, 10, 10, HWND::default(), HMENU::default(), hinst, None,
     )
     .expect("couldn't create the notice window");
-    // Keep SnapRelay's own notices out of the screenshots it takes.
-    // (Set SNAPRELAY_VISIBLE_IN_SCREENSHOTS=1 to turn this off, e.g. to take screenshots for docs/tests.)
-    if std::env::var_os("SNAPRELAY_VISIBLE_IN_SCREENSHOTS").is_none() {
-        let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-    }
+    // Kept out of screen captures, except in recording mode (see recording.rs).
+    crate::recording::register(hwnd);
     WINDOW.with(|w| w.set(Some(hwnd)));
     hwnd
 }

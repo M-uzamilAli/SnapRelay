@@ -1,5 +1,5 @@
 //! Tray icon by the clock. Left-click opens or closes the queue window;
-//! right-click shows a small menu (Show queue, Quit). The tooltip shows how many
+//! right-click shows a small menu (Show queue, Recording mode, Quit). The tooltip shows how many
 //! screenshots are queued. Like the queue window, a click only records an Action;
 //! the main loop carries it out.
 
@@ -15,7 +15,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, GetCursorPos,
     GetSystemMetrics, LoadImageW, PostMessageW, RegisterClassW, RegisterWindowMessageW,
-    SetForegroundWindow, TrackPopupMenu, HICON, HMENU, IMAGE_ICON, LR_DEFAULTCOLOR, MF_SEPARATOR,
+    SetForegroundWindow, TrackPopupMenu, HICON, HMENU, IMAGE_ICON, LR_DEFAULTCOLOR, MF_CHECKED, MF_SEPARATOR, MF_UNCHECKED,
     MF_STRING, SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTALIGN,
     TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
     WS_POPUP,
@@ -24,12 +24,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[derive(Clone, Copy)]
 pub enum Action {
     ToggleQueue,
+    /// Recording mode on/off (see recording.rs).
+    ToggleRecording,
     Quit,
 }
 
 const WM_TRAY: u32 = WM_APP + 1;
 const MENU_SHOW: usize = 1;
 const MENU_QUIT: usize = 2;
+const MENU_RECORDING: usize = 3;
 // Resource ids in assets/snaprelay.rc
 const ICON_DARK: u16 = 1;
 const ICON_LIGHT: u16 = 2;
@@ -133,6 +136,8 @@ fn load_icon() -> HICON {
 unsafe fn show_menu(hwnd: HWND) {
     let Ok(menu) = CreatePopupMenu() else { return };
     let _ = AppendMenuW(menu, MF_STRING, MENU_SHOW, w!("Show queue"));
+    let tick = if crate::recording::is_on() { MF_CHECKED } else { MF_UNCHECKED };
+    let _ = AppendMenuW(menu, MF_STRING | tick, MENU_RECORDING, w!("Recording mode (show shortcuts)"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit SnapRelay"));
     let mut pt = POINT::default();
@@ -148,6 +153,7 @@ unsafe fn show_menu(hwnd: HWND) {
     match cmd.0 as usize {
         MENU_SHOW => ACTION.with(|a| a.set(Some(Action::ToggleQueue))),
         MENU_QUIT => ACTION.with(|a| a.set(Some(Action::Quit))),
+        MENU_RECORDING => ACTION.with(|a| a.set(Some(Action::ToggleRecording))),
         _ => {}
     }
 }
