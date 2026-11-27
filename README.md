@@ -4,7 +4,7 @@
 
 SnapRelay is a small Windows utility for people who work with AI chat apps all day. Take screenshots from any app with a hotkey, let them pile up in a queue, then send them all into your chat at once. No switching back and forth after every screenshot.
 
-> **Status: working prototype.** Capture, the in-memory queue and release into a chat box work today, in ChatGPT, Claude, WhatsApp and VS Code, with no app-specific code. There is no queue window yet: the app runs in a console that logs what it does, and shows small on-screen notices. The original design is in [`docs.txt`](docs.txt) (working title there: *Visual Context Bridge*).
+> **v0.1.0, first release.** Capture, the queue window and release into a chat box work in ChatGPT, Claude, WhatsApp and VS Code, with no app-specific code. SnapRelay lives in the tray: about 15 MB of memory when idle, and the program itself is under 1 MB. The original design is in [`docs.txt`](docs.txt) (working title there: *Visual Context Bridge*).
 
 <p align="center">
   <img src="docs/assets/flow.svg" alt="Four steps: capture, queue, switch, release" width="880">
@@ -23,30 +23,39 @@ Today, sharing what's on your screen with an AI chat looks like this, once per s
 
 With five screenshots, that's five round trips. SnapRelay turns it into one: capture as many as you like while you work, switch to the chat once, and release them together.
 
-## Try it
+## Install
 
-Needs Windows 10/11 and [Rust](https://rustup.rs) (with the Visual Studio C++ build tools).
+Download from the [latest release](https://github.com/M-uzamilAli/SnapRelay/releases/latest) (Windows 10/11, 64-bit):
 
-```powershell
-cargo run
-```
+- **`SnapRelay-Setup-0.1.0.exe`**: installs for your user only (no admin), adds a Start menu entry and, if you leave the box ticked, starts with Windows. Uninstall from *Settings > Apps*.
+- **`SnapRelay-0.1.0-portable.zip`**: unzip anywhere and run `snaprelay.exe`. Nothing is installed.
 
-Then:
+The files aren't code-signed yet, so the first time Windows may say *"Windows protected your PC"*: click **More info > Run anyway**.
 
-1. Press **Win+Shift+X** and drag a box, or **Win+Shift+D** for the whole screen. You hear a short shutter sound, the area flashes, and a notice says *"Captured · 3 in queue"*.
+## Use it
+
+1. Press **Win+Shift+D** for the whole screen, or **Win+Shift+X** and drag a box. You hear a short click, the area flashes, and a notice says *"Captured · 3 queued"*. Keep working; screenshots wait in the queue.
 2. Click into the chat's message box (ChatGPT, Claude, WhatsApp, …).
-3. Press **Win+Shift+Z**. The notice counts *"Sending 2 of 3…"* and ends with *"✓ 3 of 3 delivered"*.
+3. Press **Win+Shift+Z**. Everything ticked lands in the chat, in order.
+
+Press **Win+Shift+Q** to see the queue first: untick what you don't want to send, drag rows to change the order, remove one with ✕. Each row shows *Sending… / ✓ Sent / Not sent* while it goes out.
 
 ## Shortcuts
 
-| Shortcut | What it does | If it's taken |
-|---|---|---|
-| `Win + Shift + A` | Capture an area: the screen freezes and dims, drag a box, Esc or right-click cancels | falls back to `Ctrl + Alt + Shift + A` |
-| `Win + Shift + Z` | Capture the whole monitor under the mouse | falls back to `Ctrl + Alt + Shift + Z` |
-| `Win + Shift + V` | Paste the queue into the text box you clicked into | falls back to `Win + Shift + X` |
-| `Win + Shift + Q` | Open the queue window | *not built yet* |
+| Shortcut | What it does |
+|---|---|
+| `Win + Shift + D` | Capture the whole monitor under the mouse |
+| `Win + Shift + X` | Capture an area: the screen freezes and dims, drag a box. Esc, right-click or the same shortcut again cancels |
+| `Win + Shift + Z` | Paste the ticked screenshots into the text box you clicked into |
+| `Win + Shift + Q` | Open or close the queue window |
 
-Windows gives each shortcut to whichever program claims it first. If another tool (PowerToys, AutoHotkey, …) already owns one, SnapRelay uses the fallback and says so at startup. Free the key in that tool and restart SnapRelay to get it back.
+All four can be changed in **Settings** (⚙ in the queue window, or right-click the tray icon > *Settings…*). Click a shortcut, press the new keys; if another program already owns that combination, SnapRelay says so and keeps the old one.
+
+## Settings
+
+Shortcuts, *Start with Windows*, capture sound and flash, the queue's memory limit (100 / 200 / 500 MB; a full queue refuses new captures rather than dropping any), and how long the queue window stays open when idle. Changes apply right away and are saved in `%APPDATA%\SnapRelay\settings.txt`.
+
+**Recording mode** (tray menu) is for making demo videos: the shortcuts you press appear on screen, and SnapRelay's own windows become visible to screen recorders (normally they're hidden from every screen capture, so they never end up in your screenshots).
 
 ## How releasing works
 
@@ -81,7 +90,7 @@ Delivered screenshots are removed from memory right away; only the ones still wa
 
 ## How it's built
 
-One small Rust program running in the background, with five parts, each with one job:
+One small Rust program in the tray. The main parts, each with one job:
 
 ```mermaid
 flowchart TD
@@ -103,6 +112,9 @@ flowchart TD
 | Context Buffer | `src/buffer.rs` |
 | Release Controller | `src/release.rs`, `src/clipboard.rs` (the clipboard promise) |
 | Feedback | `src/feedback.rs` (sound, flash), `src/notice.rs` (on-screen notices) |
+| Queue window + Settings panel | `src/queue.rs`, `src/settings_ui.rs` |
+| Settings and shortcuts | `src/settings.rs` (saved settings), `src/hotkeys.rs` (registers and changes shortcuts) |
+| Tray icon | `src/tray.rs` |
 
 ## Things learned along the way
 
@@ -110,24 +122,19 @@ flowchart TD
 - **No Alt in the paste shortcut.** SnapRelay swallows the letter, so the app sees a lone Alt press and jumps to its menu bar, stealing focus from the text box.
 - **Other programs read your clipboard.** Clipboard sync tools (WSL's `msrdc.exe`, PowerToys Mouse Without Borders) grab every new item. SnapRelay ignores their reads, lets them finish, and only counts the chat app taking the image.
 
-## The queue window (next)
-
-The plan for **Win+Shift+Q**: a small pop-up from the tray to see what's queued, remove single screenshots, clear everything, and pick what to send. *This picture is still a mockup.*
-
-<p align="center">
-  <img src="docs/assets/queue-popup.svg" alt="Mockup of the queue pop-up with four screenshots and their statuses" width="880">
-</p>
-
 ## Roadmap
 
-- [x] **1. Capture**: hotkeys, whole screen, area selection, PNG compression, sound + flash
-- [x] **2. Queue in memory**: store, free each screenshot once delivered
-- [x] **4. Release**: clipboard promise, wait for the app to take each image, retries, never lose a screenshot
-- [x] On-screen notices for capture and release
-- [ ] **3. Queue window** (Win+Shift+Q): thumbnails, remove, clear all, select
-- [ ] Tray icon instead of a console window
-- [ ] Memory limit for the queue
+- [x] **Capture**: hotkeys, whole screen, area selection, PNG compression, sound + flash
+- [x] **Queue in memory**: store, free each screenshot once delivered, memory limit
+- [x] **Release**: clipboard promise, wait for the app to take each image, retries, never lose a screenshot
+- [x] **Queue window**: previews, tick what to send, drag to reorder, live status, remove, clear
+- [x] **Tray icon, Settings, installer**
 - [ ] Faster capture with Windows Graphics Capture
+- [ ] Code-signed releases
+
+## Build from source
+
+Needs [Rust](https://rustup.rs) (with the Visual Studio C++ build tools). `cargo run` starts it with a console that logs what it does. `installer\build.ps1` builds the installer and the portable zip into `dist\` (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)).
 
 ## Tech
 
