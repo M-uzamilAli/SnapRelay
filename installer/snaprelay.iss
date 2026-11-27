@@ -45,6 +45,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 ; The Inter font is built into SnapRelay; its licence (SIL OFL) travels with it.
 Source: "..\assets\fonts\Inter-LICENSE.txt"; DestDir: "{app}"; DestName: "Inter-font-LICENSE.txt"
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"

@@ -16,12 +16,13 @@ if (-not $iscc) { throw 'Inno Setup 6 not found (winget install JRSoftware.InnoS
 & $iscc /Qp "/DAppVersion=$version" installer\snaprelay.iss
 if ($LASTEXITCODE) { throw 'installer build failed' }
 
-# Portable: the program plus the font licence, nothing to install.
+# Portable: the program plus the licences, nothing to install.
 $stage = Join-Path $env:TEMP "snaprelay-portable-$version"
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $stage | Out-Null
 Copy-Item target\release\snaprelay.exe $stage
 Copy-Item assets\fonts\Inter-LICENSE.txt (Join-Path $stage 'Inter-font-LICENSE.txt')
+Copy-Item LICENSE (Join-Path $stage 'LICENSE.txt')
 $zip = "dist\SnapRelay-$version-portable.zip"
 Remove-Item $zip -ErrorAction SilentlyContinue
 Compress-Archive -Path "$stage\*" -DestinationPath $zip

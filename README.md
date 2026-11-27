@@ -136,6 +136,10 @@ flowchart TD
 
 Needs [Rust](https://rustup.rs) (with the Visual Studio C++ build tools). `cargo run` starts it with a console that logs what it does. `installer\build.ps1` builds the installer and the portable zip into `dist\` (needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)).
 
+## License
+
+[MIT](LICENSE). The built-in [Inter](https://rsms.me/inter/) font is under the SIL Open Font License ([`assets/fonts/Inter-LICENSE.txt`](assets/fonts/Inter-LICENSE.txt)).
+
 ## Tech
 
 Rust · Windows 10/11 · [`windows`](https://crates.io/crates/windows) crate for Windows APIs · [`png`](https://crates.io/crates/png) for compression · Windows UI Automation (accessibility layer) to find the text box · delayed-rendering clipboard for the delivery signal.
