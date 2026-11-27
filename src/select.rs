@@ -1,6 +1,7 @@
 //! Area selection (part of the Capture Engine): shows the frozen screenshot dimmed
 //! over the monitor; the user drags a box (shown at full brightness). Mouse up =
-//! capture, Esc or right-click = cancel. Focus goes back to the previous window.
+//! capture; Esc, right-click or the area shortcut again = cancel. Focus goes back
+//! to the previous window.
 
 use std::cell::RefCell;
 use std::mem::size_of;
@@ -42,8 +43,9 @@ thread_local! {
 
 /// Let the user pick an area of the frozen screenshot. `area` is the monitor
 /// rectangle; `bgra` is its pixels, rows top-down. Returns the chosen rectangle
-/// in pixel coordinates of the screenshot, or None if cancelled.
-pub fn select_area(area: RECT, w: u32, h: u32, bgra: &[u8]) -> Option<RECT> {
+/// in pixel coordinates of the screenshot, or None if cancelled. `cancel_hotkey`
+/// is the area shortcut's id (pressing it again cancels), `cancel_label` its keys.
+pub fn select_area(area: RECT, w: u32, h: u32, bgra: &[u8], cancel_hotkey: i32, cancel_label: &str) -> Option<RECT> {
     unsafe {
         let previous = GetForegroundWindow();
         let dimmed: Vec<u8> = bgra
@@ -85,13 +87,19 @@ pub fn select_area(area: RECT, w: u32, h: u32, bgra: &[u8]) -> Option<RECT> {
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(hwnd);
 
-        // Our own little message loop until the user finishes. Hotkeys are ignored meanwhile.
+        // Our own little message loop until the user finishes. Pressing the area
+        // shortcut again cancels (an easy way out of a mistaken press); other
+        // shortcuts are ignored meanwhile.
         let mut msg = MSG::default();
         while STATE.with(|s| s.borrow().done.is_none()) {
             if GetMessageW(&mut msg, HWND::default(), 0, 0).0 <= 0 {
                 break;
             }
             if msg.message == WM_HOTKEY {
+                if msg.wParam.0 as i32 == cancel_hotkey {
+                    crate::keys::show(cancel_label, "Cancel");
+                    STATE.with(|s| s.borrow_mut().done = Some(None));
+                }
                 continue;
             }
             let _ = TranslateMessage(&msg);

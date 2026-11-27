@@ -225,7 +225,7 @@ fn capture(buf: &mut buffer::Buffer, pick_area: bool, shortcut: &str) {
     };
     let raw = if pick_area {
         let (w, h, px) = raw.pixels();
-        match select::select_area(raw.area, w, h, px) {
+        match select::select_area(raw.area, w, h, px, HK_AREA, shortcut) {
             Some(r) => capture::crop(raw, r),
             None => {
                 println!("Area capture cancelled.");
