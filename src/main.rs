@@ -150,7 +150,7 @@ fn main() {
         if let Some(action) = tray::take_action() {
             match action {
                 tray::Action::ToggleQueue => queue::toggle(&buf),
-                tray::Action::OpenSettings => settings_ui::open(),
+                tray::Action::OpenSettings => queue::show_settings(&buf),
                 tray::Action::ToggleRecording => {
                     let on = !recording::is_on();
                     recording::set(on);

@@ -1,7 +1,8 @@
 //! Queue window (Win+Shift+Q): a compact pop-up in the bottom-right corner listing
 //! what's queued (numbered 1, 2, 3 by position = sending order). Each row has a
 //! tick (send it or not), its live send status and a remove button; drag a row to
-//! change the order. "Clear" and "Send N" at the bottom.
+//! change the order. "Clear" and "Send N" at the bottom. The ⚙ in the header turns
+//! the same pop-up into the Settings panel (settings_ui.rs); ← goes back.
 //!
 //! It never takes focus (like the on-screen keyboard), so the chat box keeps its
 //! cursor and "Send" can paste straight into it. Mouse only.
@@ -143,6 +144,10 @@ enum Hit {
     CheckAll,
     /// Anywhere else on a row: click = tick/untick, drag = reorder.
     Row(u32),
+    /// ⚙ in the queue header; ← in the settings header; something in the settings panel.
+    Gear,
+    Back,
+    Panel(crate::settings_ui::PanelHit),
     /// The scrollbar's draggable handle, and the track around it.
     Thumb,
     Track,
@@ -150,7 +155,7 @@ enum Hit {
 
 impl Hit {
     fn is_button(self) -> bool {
-        matches!(self, Hit::Close | Hit::Remove(_) | Hit::Clear | Hit::Send | Hit::Check(_) | Hit::CheckAll)
+        matches!(self, Hit::Close | Hit::Remove(_) | Hit::Clear | Hit::Send | Hit::Check(_) | Hit::CheckAll | Hit::Gear | Hit::Back | Hit::Panel(_))
     }
 }
 
@@ -196,13 +201,15 @@ struct State {
     last_activity: Instant,
     /// Follows the Windows light/dark setting, read each time the window opens.
     light: bool,
+    /// Showing the Settings panel instead of the queue.
+    settings: bool,
 }
 
 impl Default for State {
     fn default() -> Self {
         State {
             hwnd: None, open: false, dpi: 96, rows: Vec::new(), seen_version: u64::MAX, scroll: 0,
-            hover: Hit::Nothing, tracking: false, title: String::new(), hint: String::new(), action: None, fonts: None, dragging: None, press: None, moving: None, edge_scroll: Instant::now(), last_activity: Instant::now(), light: true,
+            hover: Hit::Nothing, tracking: false, title: String::new(), hint: String::new(), action: None, fonts: None, dragging: None, press: None, moving: None, edge_scroll: Instant::now(), last_activity: Instant::now(), light: true, settings: false,
         }
     }
 }
@@ -262,6 +269,32 @@ pub fn sync(buf: &Buffer) {
     }
 }
 
+/// Open the pop-up straight on the Settings panel (tray menu > Settings…).
+pub fn show_settings(buf: &Buffer) {
+    if !is_open() {
+        show(buf);
+    }
+    set_view(true);
+}
+
+/// Switch between the queue and the Settings panel, keeping the bottom-right corner.
+fn set_view(settings: bool) {
+    let hwnd = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let was = std::mem::replace(&mut s.settings, settings);
+        s.hover = Hit::Nothing;
+        s.last_activity = Instant::now();
+        (was != settings).then_some(s.hwnd).flatten()
+    });
+    let Some(hwnd) = hwnd else { return };
+    if settings {
+        crate::settings_ui::enter(hwnd);
+    } else {
+        crate::settings_ui::leave();
+    }
+    place(false);
+}
+
 pub fn show(buf: &Buffer) {
     unsafe {
         let hwnd = window();
@@ -289,6 +322,7 @@ pub fn show(buf: &Buffer) {
             s.press = None;
             s.moving = None;
             s.open = true;
+            s.settings = false;
             s.last_activity = Instant::now();
             s.light = crate::theme::is_light();
         });
@@ -301,9 +335,11 @@ pub fn show(buf: &Buffer) {
 }
 
 pub fn hide() {
+    crate::settings_ui::leave();
     let (hwnd, thumbs, fonts) = STATE.with(|s| {
         let mut s = s.borrow_mut();
         s.open = false;
+        s.settings = false;
         let thumbs: Vec<HBITMAP> = s.rows.drain(..).filter_map(|r| r.thumb.map(|t| t.0)).collect();
         (s.hwnd, thumbs, s.fonts.take())
     });
@@ -447,6 +483,8 @@ struct Layout {
     body: i32,
     visible: usize,
     close: RECT,
+    gear: RECT,
+    back: RECT,
     clear: RECT,
     send: RECT,
     p: i32, // 1 unit at this scale (for small offsets)
@@ -520,11 +558,13 @@ fn layout(s: &State) -> Layout {
     let visible = s.rows.len().min(MAX_ROWS);
     let body = if s.rows.is_empty() { p(EMPTY) } else { visible as i32 * p(ROW) };
     let (w, pad) = (p(WIDTH), p(PAD));
-    let h = p(HEADER) + body + p(FOOTER);
+    let h = if s.settings { p(HEADER) + crate::settings_ui::height(s.dpi) } else { p(HEADER) + body + p(FOOTER) };
     let fy = p(HEADER) + body + p(14);
     Layout {
         w, h, pad, header: p(HEADER), row: p(ROW), body, visible,
         close: RECT { left: w - pad - p(BUTTON), top: (p(HEADER) - p(BUTTON)) / 2, right: w - pad, bottom: (p(HEADER) + p(BUTTON)) / 2 },
+        gear: RECT { left: w - pad - 2 * p(BUTTON) - p(4), top: (p(HEADER) - p(BUTTON)) / 2, right: w - pad - p(BUTTON) - p(4), bottom: (p(HEADER) + p(BUTTON)) / 2 },
+        back: RECT { left: pad - p(6), top: (p(HEADER) - p(BUTTON)) / 2, right: pad + p(110), bottom: (p(HEADER) + p(BUTTON)) / 2 },
         clear: RECT { left: pad, top: fy, right: pad + p(88), bottom: fy + p(36) },
         send: RECT { left: w - pad - p(120), top: fy, right: w - pad, bottom: fy + p(36) },
         p: p(1).max(1),
@@ -540,6 +580,15 @@ fn hit(s: &State, x: i32, y: i32) -> Hit {
     let l = layout(s);
     if inside(&l.close, x, y) {
         return Hit::Close;
+    }
+    if s.settings {
+        if inside(&l.back, x, y) {
+            return Hit::Back;
+        }
+        return crate::settings_ui::hit(s.dpi, l.header, l.w, x, y).map(Hit::Panel).unwrap_or(Hit::Nothing);
+    }
+    if inside(&l.gear, x, y) {
+        return Hit::Gear;
     }
     if s.rows.len() > MAX_ROWS {
         let t = l.track();
@@ -754,6 +803,13 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                         STATE.with(|s| s.borrow_mut().action = Some(Action::Toggle(id)))
                     }
                     Hit::CheckAll => STATE.with(|s| s.borrow_mut().action = Some(Action::ToggleAll)),
+                    Hit::Gear => set_view(true),
+                    Hit::Back => set_view(false),
+                    Hit::Panel(h) => {
+                        STATE.with(|s| s.borrow_mut().last_activity = Instant::now());
+                        crate::settings_ui::click(h);
+                        present(hwnd);
+                    }
                     Hit::Row(_) | Hit::Thumb | Hit::Track | Hit::Nothing => {}
                 }
                 LRESULT(0)
@@ -770,10 +826,16 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                 present(hwnd);
                 LRESULT(0)
             }
+            m if m == crate::settings_ui::WM_HEARD_KEY => {
+                crate::settings_ui::heard_key(wp.0 as u32);
+                present(hwnd);
+                LRESULT(0)
+            }
             WM_TIMER if wp.0 == IDLE_TIMER => {
                 let idle = STATE.with(|s| {
                     let Ok(mut s) = s.try_borrow_mut() else { return false };
-                    if s.tracking {
+                    if s.tracking || s.settings {
+                        // The mouse is over the pop-up, or Settings is open: the user is using it.
                         // The mouse is over the pop-up: the user is looking at it.
                         s.last_activity = Instant::now();
                         return false;
@@ -851,11 +913,42 @@ unsafe fn present(hwnd: HWND) {
     });
 }
 
+/// A small gear: a ring with eight teeth, centred in `r`.
+unsafe fn draw_gear(hdc: HDC, r: &RECT, c: COLORREF, bg: COLORREF, px: impl Fn(i32) -> i32) {
+    let (cx, cy) = ((r.left + r.right) as f32 / 2.0, (r.top + r.bottom) as f32 / 2.0);
+    let u = px(10) as f32 / 10.0;
+    for k in 0..8 {
+        let a = k as f32 * std::f32::consts::FRAC_PI_4;
+        let (dx, dy) = (a.cos(), a.sin());
+        crate::smooth::line(hdc, (cx + dx * 5.0 * u, cy + dy * 5.0 * u), (cx + dx * 8.0 * u, cy + dy * 8.0 * u), c, 2.6 * u);
+    }
+    let ring = |rad: f32| RECT { left: (cx - rad) as i32, top: (cy - rad) as i32, right: (cx + rad).ceil() as i32, bottom: (cy + rad).ceil() as i32 };
+    crate::smooth::rounded(hdc, &ring(6.0 * u), 6.0 * u, c, None);
+    crate::smooth::rounded(hdc, &ring(2.6 * u), 2.6 * u, bg, None);
+}
+
 unsafe fn render(mem: HDC, s: &State, l: &Layout, c: &Colors, [f_title, f_button, f_meta, f_number]: [HFONT; 4]) {
     {
         let rc = RECT { left: 0, top: 0, right: l.w, bottom: l.h };
         SetBkMode(mem, TRANSPARENT);
         fill(mem, &rc, c.bg);
+
+        // Settings view: "← Settings" header, then the panel.
+        if s.settings {
+            let pad = l.pad;
+            if s.hover == Hit::Back {
+                round(mem, &l.back, c.hover, None, l.px(8));
+            }
+            text(mem, "\u{2190}  Settings", RECT { left: pad, top: 0, right: l.close.left - l.px(8), bottom: l.header }, f_title, c.text, DT_LEFT);
+            if s.hover == Hit::Close {
+                round(mem, &l.close, c.hover, None, l.px(8));
+            }
+            draw_x(mem, &l.close, if s.hover == Hit::Close { c.text } else { c.muted }, l.px(10), (l.px(3) / 2).max(2));
+            fill(mem, &RECT { left: 0, top: l.header - l.p, right: l.w, bottom: l.header }, c.border);
+            let hover = if let Hit::Panel(h) = s.hover { Some(h) } else { None };
+            crate::settings_ui::render(mem, s.dpi, l.header, l.w, s.light, [f_meta, f_number], hover);
+            return;
+        }
 
         // Header
         let (pad, w) = (l.pad, l.w);
@@ -869,7 +962,11 @@ unsafe fn render(mem: HDC, s: &State, l: &Layout, c: &Colors, [f_title, f_button
             draw_check(mem, &box_, all, c, |v| l.px(v));
             title_left = box_.right + l.px(10);
         }
-        text(mem, &s.title, RECT { left: title_left, top: 0, right: l.close.left - l.px(8), bottom: l.header }, f_title, c.text, DT_LEFT | DT_END_ELLIPSIS);
+        text(mem, &s.title, RECT { left: title_left, top: 0, right: l.gear.left - l.px(8), bottom: l.header }, f_title, c.text, DT_LEFT | DT_END_ELLIPSIS);
+        if s.hover == Hit::Gear {
+            round(mem, &l.gear, c.hover, None, l.px(8));
+        }
+        draw_gear(mem, &l.gear, if s.hover == Hit::Gear { c.text } else { c.muted }, if s.hover == Hit::Gear { c.hover } else { c.bg }, |v| l.px(v));
         if s.hover == Hit::Close {
             round(mem, &l.close, c.hover, None, l.px(8));
         }
