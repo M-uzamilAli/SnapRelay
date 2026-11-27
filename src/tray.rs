@@ -1,5 +1,5 @@
 //! Tray icon by the clock. Left-click opens or closes the queue window;
-//! right-click shows a small menu (Show queue, Recording mode, Quit). The tooltip shows how many
+//! right-click shows a small menu (Show queue, Settings…, Recording mode, Quit). The tooltip shows how many
 //! screenshots are queued. Like the queue window, a click only records an Action;
 //! the main loop carries it out.
 
@@ -24,6 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[derive(Clone, Copy)]
 pub enum Action {
     ToggleQueue,
+    OpenSettings,
     /// Recording mode on/off (see recording.rs).
     ToggleRecording,
     Quit,
@@ -33,6 +34,7 @@ const WM_TRAY: u32 = WM_APP + 1;
 const MENU_SHOW: usize = 1;
 const MENU_QUIT: usize = 2;
 const MENU_RECORDING: usize = 3;
+const MENU_SETTINGS: usize = 4;
 // Resource ids in assets/snaprelay.rc
 const ICON_DARK: u16 = 1;
 const ICON_LIGHT: u16 = 2;
@@ -136,6 +138,7 @@ fn load_icon() -> HICON {
 unsafe fn show_menu(hwnd: HWND) {
     let Ok(menu) = CreatePopupMenu() else { return };
     let _ = AppendMenuW(menu, MF_STRING, MENU_SHOW, w!("Show queue"));
+    let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, w!("Settings\u{2026}"));
     let tick = if crate::recording::is_on() { MF_CHECKED } else { MF_UNCHECKED };
     let _ = AppendMenuW(menu, MF_STRING | tick, MENU_RECORDING, w!("Recording mode (show shortcuts)"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
@@ -154,6 +157,7 @@ unsafe fn show_menu(hwnd: HWND) {
         MENU_SHOW => ACTION.with(|a| a.set(Some(Action::ToggleQueue))),
         MENU_QUIT => ACTION.with(|a| a.set(Some(Action::Quit))),
         MENU_RECORDING => ACTION.with(|a| a.set(Some(Action::ToggleRecording))),
+        MENU_SETTINGS => ACTION.with(|a| a.set(Some(Action::OpenSettings))),
         _ => {}
     }
 }

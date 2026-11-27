@@ -72,8 +72,6 @@ const THUMB_W: i32 = 96;
 const THUMB_H: i32 = 54;
 const BUTTON: i32 = 28;
 const MAX_ROWS: usize = 6;
-/// Close the pop-up after this long without activity (never while the mouse is over it).
-const IDLE_SECS: u64 = 8;
 const IDLE_TIMER: usize = 7;
 const CHECK: i32 = 18;
 /// How far the mouse must move with the button down before a row starts dragging.
@@ -780,7 +778,9 @@ extern "system" fn queue_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> L
                         s.last_activity = Instant::now();
                         return false;
                     }
-                    s.last_activity.elapsed() >= Duration::from_secs(IDLE_SECS)
+                    // Close after this long without activity (Settings; 0 = never).
+                    let idle = crate::settings::get().idle_secs;
+                    idle > 0 && s.last_activity.elapsed() >= Duration::from_secs(idle as u64)
                 });
                 if idle {
                     hide();

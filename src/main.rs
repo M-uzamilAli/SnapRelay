@@ -11,17 +11,22 @@ mod clipboard;
 mod counter;
 mod feedback;
 mod fonts;
+mod hotkeys;
 mod keys;
 mod notice;
 mod queue;
 mod recording;
 mod release;
 mod select;
+mod settings;
+mod settings_ui;
 mod smooth;
 mod theme;
 mod tray;
 
 use std::time::Instant;
+
+use settings::Shortcut;
 
 use windows::core::w;
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HWND};
@@ -30,38 +35,12 @@ use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, SetProc
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
 use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, TranslateMessage, MSG, WM_HOTKEY};
 
-const HK_FULL: i32 = 1;
-const HK_AREA: i32 = 2;
-const HK_RELEASE: i32 = 3;
-const HK_QUEUE: i32 = 4;
+/// The demo counter's shortcut (recording mode only). The four main shortcuts are
+/// managed by hotkeys.rs, ids 1-4.
 const HK_COUNTER: i32 = 5;
-const VK_0: u32 = 0x30;
-const VK_D: u32 = 0x44;
-const VK_Q: u32 = 0x51;
-const VK_T: u32 = 0x54;
-const VK_V: u32 = 0x56;
-const VK_X: u32 = 0x58;
-const VK_Z: u32 = 0x5A;
-
-/// Try the preferred hotkey; if Windows or another app already owns it, try the next.
-/// Returns the label of the one that worked.
-fn register(id: i32, what: &str, tries: &[(HOT_KEY_MODIFIERS, u32, &'static str)]) -> Option<&'static str> {
-    for (i, (mods, vk, label)) in tries.iter().enumerate() {
-        if unsafe { RegisterHotKey(HWND::default(), id, *mods | MOD_NOREPEAT, *vk) }.is_ok() {
-            let note = if i > 0 { "   (fallback)" } else { "" };
-            println!("  {label:<18} {what}{note}");
-            return Some(label);
-        }
-        println!("  {label:<18} taken by Windows or another app");
-    }
-    println!("  (no free shortcut for '{what}', this action is unavailable)");
-    None
-}
 
 fn main() {
     // Only one SnapRelay at a time: a second copy would fight over the shortcuts.
@@ -85,36 +64,15 @@ fn main() {
     counter::set_clipboard_owner(owner);
     tray::create();
 
-    println!("SnapRelay prototype. Shortcuts:");
-    // Z, X, D sit together under the left hand: paste, area, whole screen.
-    let full_key = register(HK_FULL, "capture the whole screen under the mouse", &[
-        (MOD_WIN | MOD_SHIFT, VK_D, "Win+Shift+D"),
-        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_D, "Ctrl+Alt+Shift+D"),
-    ]);
-    let area_key = register(HK_AREA, "capture an area you drag", &[
-        (MOD_WIN | MOD_SHIFT, VK_X, "Win+Shift+X"),
-        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_X, "Ctrl+Alt+Shift+X"),
-    ]);
-    // No Alt here on purpose: a released Alt makes many apps jump to their menu bar,
-    // which steals focus from the text box we're about to paste into.
-    let release_key = register(HK_RELEASE, "paste the ticked screenshots into the focused text box", &[
-        (MOD_WIN | MOD_SHIFT, VK_Z, "Win+Shift+Z"),
-        (MOD_WIN | MOD_SHIFT, VK_V, "Win+Shift+V"),
-    ])
-    .unwrap_or("(none)");
-    let queue_key = register(HK_QUEUE, "open or close the queue window", &[
-        (MOD_WIN | MOD_SHIFT, VK_Q, "Win+Shift+Q"),
-        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_Q, "Ctrl+Alt+Shift+Q"),
-    ]);
+    settings::load();
+    hotkeys::register_all();
     // Demo helper (recording mode only): start/stop the on-screen counter.
-    register(HK_COUNTER, "start / stop the demo counter (recording mode)", &[
-        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_T, "Ctrl+Alt+Shift+T"),
-        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_0, "Ctrl+Alt+Shift+0"),
-    ]);
-    queue::set_hint(format!(
-        "{} screen  \u{00B7}  {} area",
-        full_key.unwrap_or("-"), area_key.unwrap_or("-")
-    ));
+    for vk in [0x54u32, 0x30] {
+        // Ctrl+Alt+Shift+T, else Ctrl+Alt+Shift+0
+        if unsafe { RegisterHotKey(HWND::default(), HK_COUNTER, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, vk) }.is_ok() {
+            break;
+        }
+    }
     println!("Close this window (or Ctrl+C) to quit. Screenshots are kept in memory only.\n");
     // No start-up notice: the tray icon is the only sign SnapRelay is running.
 
@@ -125,18 +83,19 @@ fn main() {
         let mut trim = false;
         if msg.message == WM_HOTKEY {
             trim = true;
-            match msg.wParam.0 as i32 {
-                HK_FULL => capture(&mut buf, false, full_key.unwrap_or("")),
-                HK_AREA => capture(&mut buf, true, area_key.unwrap_or("")),
-                HK_RELEASE => {
-                    keys::show(release_key, "Paste into chat");
-                    release::release(&mut buf, &uia, owner, release_key)
+            match hotkeys::from_id(msg.wParam.0 as i32) {
+                Some(Shortcut::Screen) => capture(&mut buf, false),
+                Some(Shortcut::Area) => capture(&mut buf, true),
+                Some(Shortcut::Paste) => {
+                    let key = hotkeys::label(Shortcut::Paste);
+                    keys::show(&key, "Paste into chat");
+                    release::release(&mut buf, &uia, owner, &key)
                 }
-                HK_QUEUE => {
-                    keys::show(queue_key.unwrap_or(""), "Queue");
+                Some(Shortcut::Queue) => {
+                    keys::show(&hotkeys::label(Shortcut::Queue), "Queue");
                     queue::toggle(&buf)
                 }
-                HK_COUNTER => {
+                None if msg.wParam.0 as i32 == HK_COUNTER => {
                     if recording::is_on() {
                         counter::toggle();
                     } else {
@@ -181,7 +140,7 @@ fn main() {
                 queue::Action::Send => {
                     trim = true;
                     // The pop-up never took focus, so the chat box still has it.
-                    release::release(&mut buf, &uia, owner, release_key);
+                    release::release(&mut buf, &uia, owner, &hotkeys::label(Shortcut::Paste));
                     if buf.summary().0 == 0 {
                         queue::hide();
                     }
@@ -191,6 +150,7 @@ fn main() {
         if let Some(action) = tray::take_action() {
             match action {
                 tray::Action::ToggleQueue => queue::toggle(&buf),
+                tray::Action::OpenSettings => settings_ui::open(),
                 tray::Action::ToggleRecording => {
                     let on = !recording::is_on();
                     recording::set(on);
@@ -229,12 +189,21 @@ fn give_back_memory() {
 
 /// Capture Engine hand-off: copy the screen, optionally let the user pick an area,
 /// give feedback, compress, and store in the Context Buffer.
-fn capture(buf: &mut buffer::Buffer, pick_area: bool, shortcut: &str) {
+fn capture(buf: &mut buffer::Buffer, pick_area: bool) {
     let t = Instant::now();
+    let which = if pick_area { Shortcut::Area } else { Shortcut::Screen };
+    let shortcut = hotkeys::label(which);
+    let prefs = settings::get();
+    // Queue memory limit (Settings): stop here rather than drop anything already queued.
+    if buf.summary().1 >= prefs.limit_mb as usize * 1024 * 1024 {
+        keys::show(&shortcut, "Queue full");
+        notice::show(&format!("Queue full ({} MB) \u{00B7} send or clear first", prefs.limit_mb), 3000);
+        return;
+    }
     // SnapRelay's own windows never go into the screenshot, even in recording mode.
     let grabbed = recording::hidden(capture::grab_monitor_under_cursor);
     // Recording mode: show the shortcut now, after the copy, so it isn't in the picture.
-    keys::show(shortcut, if pick_area { "Capture area" } else { "Capture screen" });
+    keys::show(&shortcut, if pick_area { "Capture area" } else { "Capture screen" });
     let raw = match grabbed {
         Ok(raw) => raw,
         Err(e) => {
@@ -245,7 +214,7 @@ fn capture(buf: &mut buffer::Buffer, pick_area: bool, shortcut: &str) {
     };
     let raw = if pick_area {
         let (w, h, px) = raw.pixels();
-        match select::select_area(raw.area, w, h, px, HK_AREA, shortcut) {
+        match select::select_area(raw.area, w, h, px, hotkeys::id(Shortcut::Area), &shortcut) {
             Some(r) => capture::crop(raw, r),
             None => {
                 println!("Area capture cancelled.");
@@ -258,8 +227,13 @@ fn capture(buf: &mut buffer::Buffer, pick_area: bool, shortcut: &str) {
     };
     // Feedback before the slow compression, so it feels instant
     // (and the flash never appears in the screenshot).
-    feedback::click();
-    feedback::flash(raw.area);
+    // (Both can be turned off in Settings.)
+    if prefs.sound {
+        feedback::click();
+    }
+    if prefs.flash {
+        feedback::flash(raw.area);
+    }
     let preview_box = queue::preview_size(raw.dpi());
     match capture::compress(raw, preview_box) {
         Ok(frame) => {
