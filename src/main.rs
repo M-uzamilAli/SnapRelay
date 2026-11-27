@@ -8,6 +8,7 @@
 mod buffer;
 mod capture;
 mod clipboard;
+mod counter;
 mod feedback;
 mod fonts;
 mod keys;
@@ -38,8 +39,11 @@ const HK_FULL: i32 = 1;
 const HK_AREA: i32 = 2;
 const HK_RELEASE: i32 = 3;
 const HK_QUEUE: i32 = 4;
+const HK_COUNTER: i32 = 5;
+const VK_0: u32 = 0x30;
 const VK_D: u32 = 0x44;
 const VK_Q: u32 = 0x51;
+const VK_T: u32 = 0x54;
 const VK_V: u32 = 0x56;
 const VK_X: u32 = 0x58;
 const VK_Z: u32 = 0x5A;
@@ -78,6 +82,7 @@ fn main() {
         println!("Couldn't load the built-in Inter font; Windows will substitute one.");
     }
     let owner = clipboard::create_owner_window();
+    counter::set_clipboard_owner(owner);
     tray::create();
 
     println!("SnapRelay prototype. Shortcuts:");
@@ -100,6 +105,11 @@ fn main() {
     let queue_key = register(HK_QUEUE, "open or close the queue window", &[
         (MOD_WIN | MOD_SHIFT, VK_Q, "Win+Shift+Q"),
         (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_Q, "Ctrl+Alt+Shift+Q"),
+    ]);
+    // Demo helper (recording mode only): start/stop the on-screen counter.
+    register(HK_COUNTER, "start / stop the demo counter (recording mode)", &[
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_T, "Ctrl+Alt+Shift+T"),
+        (MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_0, "Ctrl+Alt+Shift+0"),
     ]);
     queue::set_hint(format!(
         "{} screen  \u{00B7}  {} area",
@@ -125,6 +135,13 @@ fn main() {
                 HK_QUEUE => {
                     keys::show(queue_key.unwrap_or(""), "Queue");
                     queue::toggle(&buf)
+                }
+                HK_COUNTER => {
+                    if recording::is_on() {
+                        counter::toggle();
+                    } else {
+                        notice::show("Turn on Recording mode to use the counter", 2500);
+                    }
                 }
                 _ => {}
             }
@@ -177,6 +194,9 @@ fn main() {
                 tray::Action::ToggleRecording => {
                     let on = !recording::is_on();
                     recording::set(on);
+                    if !on {
+                        counter::hide();
+                    }
                     println!("Recording mode {}.", if on { "on" } else { "off" });
                     notice::show(if on { "Recording mode on \u{00B7} shortcuts show on screen" } else { "Recording mode off" }, 2500);
                 }
@@ -245,6 +265,7 @@ fn capture(buf: &mut buffer::Buffer, pick_area: bool, shortcut: &str) {
         Ok(frame) => {
             let (w, h, kb) = (frame.width, frame.height, frame.png.len() / 1024);
             let id = buf.add(frame);
+            counter::screenshot_taken();
             let (pending, bytes) = buf.summary();
             println!(
                 "Captured #{id}: {w}x{h}, {kb} KB in {} ms. Queue: {pending} pending, {} KB in memory.",

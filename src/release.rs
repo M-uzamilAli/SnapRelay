@@ -118,7 +118,7 @@ fn kind_name(ct: UIA_CONTROLTYPE_ID) -> &'static str {
     }
 }
 
-fn app_name(pid: u32) -> String {
+pub(crate) fn app_name(pid: u32) -> String {
     unsafe {
         let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
             return format!("process {pid}");
